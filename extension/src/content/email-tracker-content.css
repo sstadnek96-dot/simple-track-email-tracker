@@ -1,0 +1,145 @@
+.simple-track-row-badge,
+.simple-track-row-badge * {
+  box-sizing: border-box;
+}
+
+.simple-track-status-cell {
+  position: relative !important;
+  z-index: 2147483646 !important;
+  width: 18px !important;
+  min-width: 18px !important;
+  max-width: 18px !important;
+  padding: 0 6px 0 0 !important;
+  overflow: visible !important;
+  pointer-events: auto !important;
+  text-align: center !important;
+  vertical-align: middle !important;
+  white-space: nowrap !important;
+}
+
+.simple-track-row-badge {
+  position: relative;
+  z-index: 2147483646;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 0;
+  cursor: default;
+  pointer-events: auto !important;
+}
+
+.simple-track-row-badge[data-simple-track-compact="true"] {
+  width: 12px;
+  height: 12px;
+  margin-left: 5px;
+}
+
+.simple-track-glyph {
+  display: block;
+  width: 10px;
+  height: 10px;
+  background: #1a73e8;
+  border: 1px solid #ffffff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(26, 115, 232, 0.24);
+}
+
+.simple-track-row-badge[data-simple-track-state="opened"] .simple-track-glyph,
+.simple-track-row-badge[data-simple-track-state="clicked"] .simple-track-glyph {
+  background: #d93025;
+  box-shadow: 0 0 0 1px rgba(217, 48, 37, 0.24);
+}
+
+.simple-track-hover-card {
+  position: fixed;
+  z-index: 2147483647;
+  width: min(200px, calc(100vw - 24px));
+  padding: 7px;
+  color: #101828;
+  pointer-events: none;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(16, 24, 40, 0.18);
+}
+
+.simple-track-hover-card::after {
+  position: absolute;
+  right: 17px;
+  top: -6px;
+  width: 10px;
+  height: 10px;
+  content: "";
+  background: #ffffff;
+  border-left: 1px solid #dbe3ef;
+  border-top: 1px solid #dbe3ef;
+  transform: rotate(45deg);
+}
+
+.simple-track-hover-title {
+  margin: 0 0 5px;
+  overflow: hidden;
+  color: #101828;
+  font: 700 11px/1.25 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.simple-track-hover-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  color: #1a73e8;
+  background: #e8f0fe;
+  border-radius: 999px;
+  font: 800 10px/1 Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.simple-track-hover-status[data-simple-track-state="opened"],
+.simple-track-hover-status[data-simple-track-state="clicked"] {
+  color: #b3261e;
+  background: #fce8e6;
+}
+
+.simple-track-hover-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.simple-track-hover-metric {
+  padding: 4px;
+  background: #f6f8fc;
+  border: 1px solid #edf1f7;
+  border-radius: 8px;
+}
+
+.simple-track-hover-metric strong,
+.simple-track-hover-detail strong {
+  display: block;
+  color: #101828;
+  font: 800 11px/1.15 Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.simple-track-hover-metric span,
+.simple-track-hover-detail span {
+  display: block;
+  margin-top: 2px;
+  color: #667085;
+  font: 500 10px/1.25 Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.simple-track-hover-detail {
+  display: grid;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.simple-track-row-badge:focus-visible {
+  outline: 3px solid rgba(26, 115, 232, 0.30);
+  outline-offset: 2px;
+}

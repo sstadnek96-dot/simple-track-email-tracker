@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Simple Track</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <img class="brand-mark" src="../../assets/brand/simple-track-logo.svg" alt="">
+          <div>
+            <h1>Simple Track</h1>
+            <p>Gmail and Outlook tracking</p>
+          </div>
+        </div>
+        <button class="icon-button" id="openOptions" type="button" aria-label="Open settings" title="Settings">
+          <span class="settings-icon" aria-hidden="true"></span>
+        </button>
+      </header>
+
+      <section class="hero-panel">
+        <div>
+          <p class="eyebrow">Open rate</p>
+          <strong id="openRate">0%</strong>
+          <span class="hero-caption">Live status for tracked sends</span>
+        </div>
+        <div class="hero-chart" aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </section>
+
+      <section class="stats-grid" aria-label="Tracking totals">
+        <article>
+          <span class="stat-dot sent"></span>
+          <span id="sentCount">0</span>
+          <p>Sent</p>
+        </article>
+        <article>
+          <span class="stat-dot opened"></span>
+          <span id="openedCount">0</span>
+          <p>Opened</p>
+        </article>
+        <article>
+          <span class="stat-dot unread"></span>
+          <span id="unopenedCount">0</span>
+          <p>Unread</p>
+        </article>
+        <article>
+          <span class="stat-dot clicks"></span>
+          <span id="clickedCount">0</span>
+          <p>Clicks</p>
+        </article>
+      </section>
+
+      <div class="toolbar">
+        <label class="search-box">
+          <span class="search-icon" aria-hidden="true"></span>
+          <input id="searchInput" type="search" placeholder="Search subject or recipient">
+        </label>
+        <label class="switch" title="Tracking">
+          <input id="trackingToggle" type="checkbox">
+          <span></span>
+        </label>
+      </div>
+
+      <nav class="tabs" aria-label="Message filters">
+        <button class="tab is-active" data-filter="all" type="button">All</button>
+        <button class="tab" data-filter="opened" type="button">Opened</button>
+        <button class="tab" data-filter="unopened" type="button">Unread</button>
+        <button class="tab" data-filter="clicked" type="button">Clicks</button>
+      </nav>
+
+      <section class="activity-list" id="activityList" aria-label="Tracked messages"></section>
+    </main>
+
+    <template id="messageTemplate">
+      <details class="message-card">
+        <summary class="message-summary">
+          <div class="message-copy">
+            <div class="message-line">
+              <strong class="recipients"></strong>
+              <time></time>
+            </div>
+            <p class="activity"></p>
+            <span class="status-pill"></span>
+          </div>
+          <span class="chevron" aria-hidden="true"></span>
+        </summary>
+        <div class="message-report">
+          <div class="report-metrics">
+            <span><strong class="opens"></strong><em>Opens</em></span>
+            <span><strong class="clicks"></strong><em>Clicks</em></span>
+            <span><strong class="status-value"></strong><em>Status</em></span>
+          </div>
+          <dl class="report-details">
+            <div>
+              <dt>Subject</dt>
+              <dd class="subject"></dd>
+            </div>
+            <div>
+              <dt>Last activity</dt>
+              <dd class="last-activity"></dd>
+            </div>
+            <div>
+              <dt>Device</dt>
+              <dd class="device"></dd>
+            </div>
+            <div>
+              <dt>Location</dt>
+              <dd class="location"></dd>
+            </div>
+          </dl>
+          <button class="mute-button" type="button"></button>
+        </div>
+      </details>
+    </template>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

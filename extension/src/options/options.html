@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Simple Track Settings</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main class="settings-shell">
+      <header>
+        <div class="brand-mark" aria-hidden="true">ST</div>
+        <div>
+          <h1>Simple Track</h1>
+          <p>Tracking defaults and privacy controls</p>
+        </div>
+      </header>
+
+      <form id="settingsForm">
+        <section>
+          <h2>Tracking</h2>
+          <label class="toggle-row">
+            <span>
+              <strong>Tracking enabled</strong>
+              <small>Apply indicators and collect open events.</small>
+            </span>
+            <input name="trackingEnabled" type="checkbox">
+          </label>
+          <label class="toggle-row">
+            <span>
+              <strong>Auto-track new messages</strong>
+              <small>New composed messages start with tracking on.</small>
+            </span>
+            <input name="autoTrackNewMessages" type="checkbox">
+          </label>
+          <label class="toggle-row">
+            <span>
+              <strong>Unread dots</strong>
+              <small>Show blue dots for sent messages that have not opened.</small>
+            </span>
+            <input name="showUnreadDots" type="checkbox">
+          </label>
+          <label class="toggle-row">
+            <span>
+              <strong>Opened checks</strong>
+              <small>Show checks beside opened messages.</small>
+            </span>
+            <input name="showOpenedChecks" type="checkbox">
+          </label>
+          <label class="toggle-row">
+            <span>
+              <strong>Track clicks</strong>
+              <small>Wrap links so clicks can be counted before redirecting.</small>
+            </span>
+            <input name="trackClicks" type="checkbox">
+          </label>
+        </section>
+
+        <section>
+          <h2>Notifications</h2>
+          <label class="toggle-row">
+            <span>
+              <strong>Desktop notifications</strong>
+              <small>Show a notification when an email opens.</small>
+            </span>
+            <input name="notificationsEnabled" type="checkbox">
+          </label>
+          <label class="toggle-row">
+            <span>
+              <strong>Compact row badges</strong>
+              <small>Use a smaller indicator in dense inbox views.</small>
+            </span>
+            <input name="compactRows" type="checkbox">
+          </label>
+        </section>
+
+        <section>
+          <h2>Backend</h2>
+          <label class="field">
+            <span>Tracking service</span>
+            <input name="backendBaseUrl" type="url" readonly>
+          </label>
+          <label class="field">
+            <span>Event retention days</span>
+            <input name="retentionDays" type="number" min="1" max="365">
+          </label>
+        </section>
+
+        <section>
+          <h2>Privacy</h2>
+          <label class="toggle-row">
+            <span>
+              <strong>Privacy mode</strong>
+              <small>Hide location and device details inside hover cards.</small>
+            </span>
+            <input name="privacyMode" type="checkbox">
+          </label>
+        </section>
+
+        <footer>
+          <p id="saveState" role="status"></p>
+          <button type="submit">Save Settings</button>
+        </footer>
+      </form>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+</html>

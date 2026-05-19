@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "Simple Track Email Tracker",
+  "short_name": "Simple Track",
+  "description": "Track email opens from Gmail and Outlook web with clean inbox indicators.",
+  "version": "0.1.0",
+  "action": {
+    "default_title": "Simple Track",
+    "default_popup": "src/popup/popup.html",
+    "default_icon": {
+      "16": "assets/icons/icon-16.png",
+      "32": "assets/icons/icon-32.png",
+      "48": "assets/icons/icon-48.png",
+      "128": "assets/icons/icon-128.png"
+    }
+  },
+  "background": {
+    "service_worker": "src/background/service-worker.js"
+  },
+  "icons": {
+    "16": "assets/icons/icon-16.png",
+    "32": "assets/icons/icon-32.png",
+    "48": "assets/icons/icon-48.png",
+    "128": "assets/icons/icon-128.png"
+  },
+  "options_page": "src/options/options.html",
+  "permissions": [
+    "alarms",
+    "notifications",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://mail.google.com/*",
+    "https://outlook.live.com/*",
+    "https://outlook.office.com/*",
+    "https://outlook.office365.com/*",
+    "https://*.cloudfunctions.net/*",
+    "https://*.run.app/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mail.google.com/*",
+        "https://outlook.live.com/*",
+        "https://outlook.office.com/*",
+        "https://outlook.office365.com/*"
+      ],
+      "css": [
+        "src/content/email-tracker-content.css"
+      ],
+      "js": [
+        "src/content/email-tracker-content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "name": "simple-track-email-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A polished Chrome MV3 extension prototype for email open tracking in Gmail and Outlook web.",
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/validate-extension.mjs && node scripts/test-content-ui.mjs",
+    "test:static": "node scripts/validate-extension.mjs",
+    "test:ui": "node scripts/test-content-ui.mjs",
+    "package": "node scripts/package-extension.mjs",
+    "firebase:emulators": "firebase emulators:start --only functions,firestore",
+    "firebase:deploy": "firebase deploy --only functions,firestore:rules",
+    "icons": "powershell -ExecutionPolicy Bypass -File scripts/generate-icons.ps1"
+  },
+  "keywords": [
+    "chrome-extension",
+    "gmail",
+    "outlook",
+    "email-tracking"
+  ],
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "playwright": "^1.60.0"
+  }
+}
