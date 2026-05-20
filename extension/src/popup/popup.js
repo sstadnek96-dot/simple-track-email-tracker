@@ -7,6 +7,7 @@ const fallbackState = {
       status: "opened",
       opens: 3,
       clicks: 0,
+      attachmentOpens: 1,
       lastActivityAt: "2026-05-18T18:44:14.000Z",
       sentAt: "2026-05-18T17:09:25.000Z",
       events: [
@@ -18,7 +19,7 @@ const fallbackState = {
           url: null
         },
         {
-          type: "click",
+          type: "attachment_open",
           createdAt: "2026-05-18T18:46:08.000Z",
           device: "Chrome on Windows",
           location: "Saskatoon, SK",
@@ -31,13 +32,16 @@ const fallbackState = {
     }
   ],
   settings: { trackingEnabled: true },
-  summary: { sent: 1, opened: 1, unopened: 0, clicked: 0, openRate: 100 }
+  summary: { sent: 1, opened: 1, unopened: 0, clicked: 0, attachmentOpened: 1, openRate: 100 }
 };
 
 let currentState = fallbackState;
 let currentFilter = "all";
 let currentSearch = "";
 let popupRefreshTimer = null;
+let realtimeSource = null;
+let activeRealtimeUrl = null;
+let openMessageIds = new Set();
 
 const POPUP_REFRESH_MS = 2500;
 
@@ -47,6 +51,7 @@ const elements = {
   openedCount: document.querySelector("#openedCount"),
   unopenedCount: document.querySelector("#unopenedCount"),
   clickedCount: document.querySelector("#clickedCount"),
+  attachmentCount: document.querySelector("#attachmentCount"),
   activityList: document.querySelector("#activityList"),
   template: document.querySelector("#messageTemplate"),
   searchInput: document.querySelector("#searchInput"),
@@ -60,6 +65,7 @@ document.addEventListener("DOMContentLoaded", init);
 async function init() {
   currentState = await getState();
   render();
+  syncRealtimeStream(currentState.realtimeUrl);
 
   elements.searchInput.addEventListener("input", (event) => {
     currentSearch = event.target.value.trim().toLowerCase();
@@ -91,11 +97,13 @@ async function init() {
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
       stopPopupRefresh();
+      closeRealtimeStream();
       return;
     }
 
     refreshPopupState();
     startPopupRefresh();
+    syncRealtimeStream(activeRealtimeUrl);
   });
 
   startPopupRefresh();
@@ -136,6 +144,61 @@ async function refreshPopupState() {
   const nextState = await getState();
   if (!nextState?.ok) return;
   currentState = nextState;
+  syncRealtimeStream(currentState.realtimeUrl);
+  render();
+}
+
+function syncRealtimeStream(nextUrl) {
+  activeRealtimeUrl = nextUrl || null;
+
+  if (!activeRealtimeUrl || document.hidden || !globalThis.EventSource) {
+    closeRealtimeStream();
+    return;
+  }
+
+  if (realtimeSource && realtimeSource.url === activeRealtimeUrl) return;
+
+  closeRealtimeStream();
+
+  realtimeSource = new EventSource(activeRealtimeUrl);
+  realtimeSource.addEventListener("message", (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      if (payload?.message) {
+        applyRealtimeMessage(payload.message);
+      }
+    } catch (error) {
+      console.warn("Simple Track popup realtime event was not readable", error);
+    }
+  });
+  realtimeSource.addEventListener("stream-error", closeRealtimeStream);
+}
+
+function closeRealtimeStream() {
+  if (!realtimeSource) return;
+  realtimeSource.close();
+  realtimeSource = null;
+}
+
+function applyRealtimeMessage(message) {
+  if (!message?.id) return;
+
+  const existingIndex = currentState.messages.findIndex((trackedMessage) => trackedMessage.id === message.id);
+  const existingMessage = existingIndex >= 0 ? currentState.messages[existingIndex] : null;
+  const nextMessage = {
+    ...existingMessage,
+    ...message,
+    muted: existingMessage?.muted ?? Boolean(message.muted)
+  };
+
+  if (existingIndex >= 0) {
+    currentState.messages = currentState.messages.map((trackedMessage, index) => index === existingIndex ? nextMessage : trackedMessage);
+  } else {
+    currentState.messages = [nextMessage, ...currentState.messages];
+  }
+
+  currentState.messages.sort(compareMessagesByActivity);
+  currentState.summary = summarizeMessages(currentState.messages);
   render();
 }
 
@@ -147,12 +210,14 @@ function render() {
   elements.openedCount.textContent = summary.opened;
   elements.unopenedCount.textContent = summary.unopened;
   elements.clickedCount.textContent = summary.clicked;
+  elements.attachmentCount.textContent = summary.attachmentOpened || 0;
   elements.trackingToggle.checked = Boolean(settings.trackingEnabled);
 
   renderMessages();
 }
 
 function renderMessages() {
+  rememberOpenCards();
   elements.activityList.replaceChildren();
 
   const messages = currentState.messages
@@ -174,8 +239,18 @@ function renderMessages() {
 
   for (const message of messages) {
     const node = elements.template.content.firstElementChild.cloneNode(true);
+    node.dataset.messageId = message.id;
+    node.open = openMessageIds.has(message.id);
     node.classList.toggle("is-opened", message.opens > 0);
     node.classList.toggle("is-clicked", message.clicks > 0);
+    node.classList.toggle("is-attachment-opened", message.attachmentOpens > 0);
+    node.addEventListener("toggle", () => {
+      if (node.open) {
+        openMessageIds.add(message.id);
+      } else {
+        openMessageIds.delete(message.id);
+      }
+    });
 
     const status = getStatus(message);
     const statusPill = node.querySelector(".status-pill");
@@ -187,6 +262,7 @@ function renderMessages() {
     renderActivity(node.querySelector(".activity"), message, status);
     node.querySelector(".opens").textContent = String(message.opens);
     node.querySelector(".clicks").textContent = String(message.clicks);
+    node.querySelector(".attachment-opens").textContent = String(message.attachmentOpens || 0);
     node.querySelector(".status-value").textContent = status.shortLabel;
     node.querySelector(".subject").textContent = message.subject;
     node.querySelector(".last-activity").textContent = formatDetailedDate(message.lastActivityAt) || "Not opened yet";
@@ -209,6 +285,16 @@ function renderMessages() {
   }
 }
 
+function rememberOpenCards() {
+  for (const card of elements.activityList.querySelectorAll(".message-card[data-message-id]")) {
+    if (card.open) {
+      openMessageIds.add(card.dataset.messageId);
+    } else {
+      openMessageIds.delete(card.dataset.messageId);
+    }
+  }
+}
+
 async function toggleMuted(id, muted) {
   currentState.messages = currentState.messages.map((message) => {
     if (message.id !== id) return message;
@@ -219,6 +305,7 @@ async function toggleMuted(id, muted) {
 }
 
 async function deleteMessage(id) {
+  openMessageIds.delete(id);
   currentState.messages = currentState.messages.filter((message) => message.id !== id);
   render();
   await sendMessage({ type: "simpleTrack:deleteMessage", id });
@@ -228,6 +315,7 @@ function matchesFilter(message) {
   if (currentFilter === "opened") return message.opens > 0;
   if (currentFilter === "unopened") return message.opens === 0;
   if (currentFilter === "clicked") return message.clicks > 0;
+  if (currentFilter === "files") return message.attachmentOpens > 0;
   return true;
 }
 
@@ -240,10 +328,12 @@ function matchesSearch(message) {
 function getStatus(message) {
   const openLabel = `${message.opens} open${message.opens === 1 ? "" : "s"}`;
   const clickLabel = `${message.clicks} click${message.clicks === 1 ? "" : "s"}`;
+  const fileLabel = `${message.attachmentOpens || 0} file${message.attachmentOpens === 1 ? "" : "s"}`;
 
-  if (message.clicks > 0) return { key: "clicked", label: `${openLabel} / ${clickLabel}`, shortLabel: "Clicked" };
-  if (message.opens > 0) return { key: "opened", label: `${openLabel} / ${clickLabel}`, shortLabel: "Opened" };
-  return { key: "sent", label: `${openLabel} / ${clickLabel}`, shortLabel: "Unread" };
+  if (message.clicks > 0) return { key: "clicked", label: `${openLabel} / ${clickLabel} / ${fileLabel}`, shortLabel: "Clicked" };
+  if (message.attachmentOpens > 0) return { key: "opened", label: `${openLabel} / ${clickLabel} / ${fileLabel}`, shortLabel: "File opened" };
+  if (message.opens > 0) return { key: "opened", label: `${openLabel} / ${clickLabel} / ${fileLabel}`, shortLabel: "Opened" };
+  return { key: "sent", label: `${openLabel} / ${clickLabel} / ${fileLabel}`, shortLabel: "Unread" };
 }
 
 function getRecipientLabel(message) {
@@ -264,6 +354,10 @@ function renderActivity(container, message, status) {
 function getActivityPhrase(message, status) {
   if (status.key === "clicked") {
     return `had a link clicked ${formatRelativeDate(message.lastActivityAt)} at ${formatTime(message.lastActivityAt)}`;
+  }
+
+  if (message.attachmentOpens > 0 && getLastEventType(message) === "attachment_open") {
+    return `had a file opened ${formatRelativeDate(message.lastActivityAt)} at ${formatTime(message.lastActivityAt)}`;
   }
 
   if (status.key === "opened") {
@@ -293,11 +387,11 @@ function renderEventTimeline(node, message) {
 
   for (const event of events.slice(0, 12)) {
     const item = document.createElement("li");
-    item.className = `event-row ${event.type === "click" ? "is-click" : "is-open"}`;
+    item.className = `event-row ${getEventClass(event)}`;
 
     const icon = document.createElement("span");
     icon.className = "event-icon";
-    icon.textContent = event.type === "click" ? "C" : "O";
+    icon.textContent = getEventIcon(event);
 
     const copy = document.createElement("span");
     copy.className = "event-copy";
@@ -317,19 +411,59 @@ function renderEventTimeline(node, message) {
 }
 
 function getEventTitle(event) {
-  if (event.type === "click") {
+  if (event.type === "attachment_open") {
     if (event.kind === "pdf") {
-      return `Opened PDF: ${getEventTarget(event)}`;
+      return `Email attachment opened: ${getEventTarget(event)}`;
     }
 
-    if (event.kind === "document") {
-      return `Opened document: ${getEventTarget(event)}`;
-    }
+    return `Document opened: ${getEventTarget(event)}`;
+  }
 
-    return `Clicked ${getEventTarget(event)}`;
+  if (event.type === "click") {
+    return `Link clicked: ${getEventTarget(event)}`;
   }
 
   return "Opened email";
+}
+
+function getEventClass(event) {
+  if (event.type === "click") return "is-click";
+  if (event.type === "attachment_open") return "is-attachment";
+  return "is-open";
+}
+
+function getEventIcon(event) {
+  if (event.type === "click") return "L";
+  if (event.type === "attachment_open") return "F";
+  return "O";
+}
+
+function getLastEventType(message) {
+  const events = Array.isArray(message.events) ? message.events : [];
+  return events[0]?.type || "";
+}
+
+function compareMessagesByActivity(a, b) {
+  const aTime = new Date(a.lastActivityAt || a.sentAt).getTime();
+  const bTime = new Date(b.lastActivityAt || b.sentAt).getTime();
+  return bTime - aTime;
+}
+
+function summarizeMessages(messages) {
+  const sent = messages.length;
+  const opened = messages.filter((message) => message.opens > 0).length;
+  const clicked = messages.filter((message) => message.clicks > 0).length;
+  const attachmentOpened = messages.filter((message) => message.attachmentOpens > 0).length;
+  const unopened = Math.max(0, sent - opened);
+
+  return {
+    sent,
+    opened,
+    clicked,
+    attachmentOpened,
+    unopened,
+    openRate: sent > 0 ? Math.round((opened / sent) * 100) : 0
+  };
 }
 
 function getEventTarget(event) {

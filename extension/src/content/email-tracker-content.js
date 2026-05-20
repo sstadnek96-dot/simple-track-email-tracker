@@ -39,6 +39,8 @@
   let rowMatchRetryTimer = null;
   let stateRefreshTimer = null;
   let stateRefreshInFlight = null;
+  let realtimeSource = null;
+  let activeRealtimeUrl = null;
   let lastHoverStateRefreshAt = 0;
   let lastLocation = location.href;
 
@@ -70,6 +72,11 @@
       if (event.key === "Escape") hideHoverCard();
     }, true);
     document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        closeRealtimeStream();
+      } else {
+        syncRealtimeStream(activeRealtimeUrl);
+      }
       scheduleStateRefresh(document.hidden ? BACKGROUND_STATE_REFRESH_MS : 250);
     });
 
@@ -90,6 +97,64 @@
     if (!response?.ok) return;
     cachedMessages = response.messages || [];
     cachedSettings = response.settings || {};
+    syncRealtimeStream(response.realtimeUrl);
+  }
+
+  function syncRealtimeStream(nextUrl) {
+    activeRealtimeUrl = nextUrl || null;
+
+    if (!activeRealtimeUrl || !cachedSettings.trackingEnabled || document.hidden || !globalThis.EventSource) {
+      closeRealtimeStream();
+      return;
+    }
+
+    if (realtimeSource && realtimeSource.url === activeRealtimeUrl) return;
+
+    closeRealtimeStream();
+
+    realtimeSource = new EventSource(activeRealtimeUrl);
+    realtimeSource.addEventListener("message", (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload?.message) {
+          applyRealtimeMessage(payload.message);
+        }
+      } catch (error) {
+        console.warn("Simple Track realtime event was not readable", error);
+      }
+    });
+    realtimeSource.addEventListener("stream-error", () => {
+      closeRealtimeStream();
+    });
+  }
+
+  function closeRealtimeStream() {
+    if (!realtimeSource) return;
+    realtimeSource.close();
+    realtimeSource = null;
+  }
+
+  function applyRealtimeMessage(message) {
+    if (!message?.id) return;
+
+    const existingIndex = cachedMessages.findIndex((trackedMessage) => trackedMessage.id === message.id);
+    const existingMessage = existingIndex >= 0 ? cachedMessages[existingIndex] : null;
+    const nextMessage = {
+      ...existingMessage,
+      ...message,
+      rowMatchAfter: existingMessage?.rowMatchAfter || message.rowMatchAfter || null,
+      muted: existingMessage?.muted ?? Boolean(message.muted)
+    };
+
+    if (existingIndex >= 0) {
+      cachedMessages = cachedMessages.map((trackedMessage, index) => index === existingIndex ? nextMessage : trackedMessage);
+    } else {
+      cachedMessages = [nextMessage, ...cachedMessages];
+    }
+
+    cachedMessages.sort(compareMessagesByActivity);
+    queueDecorate();
+    refreshActiveHoverCard();
   }
 
   function scheduleStateRefresh(delay = getStateRefreshDelay()) {
@@ -378,6 +443,12 @@
 
   function compareMessagesBySentAt(a, b) {
     return getTimeValue(b.sentAt) - getTimeValue(a.sentAt);
+  }
+
+  function compareMessagesByActivity(a, b) {
+    const aTime = getTimeValue(a.lastActivityAt || a.sentAt);
+    const bTime = getTimeValue(b.lastActivityAt || b.sentAt);
+    return bTime - aTime;
   }
 
   function isMessageReadyForRowMatching(message) {
@@ -807,7 +878,8 @@
     grid.className = "simple-track-hover-grid";
     grid.append(
       createMetric(String(message.opens), "Opens"),
-      createMetric(String(message.clicks), "Clicks")
+      createMetric(String(message.clicks), "Links"),
+      createMetric(String(message.attachmentOpens || 0), "Files")
     );
 
     const detail = document.createElement("span");

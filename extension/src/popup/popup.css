@@ -214,7 +214,7 @@ h1 {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
   margin: 11px 0;
 }
@@ -253,10 +253,14 @@ h1 {
   background: var(--amber);
 }
 
+.stat-dot.files {
+  background: var(--teal);
+}
+
 .stats-grid span:not(.stat-dot) {
   display: block;
   color: #0f172a;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 850;
 }
 
@@ -432,6 +436,12 @@ h1 {
   border-left-color: var(--amber);
 }
 
+.message-card.is-attachment-opened:not(.is-clicked) {
+  background: #e3ffe2;
+  border-color: #b8e6bd;
+  border-left-color: var(--teal);
+}
+
 .message-summary {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 22px;
@@ -571,7 +581,7 @@ time {
 
 .report-metrics {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
   padding-top: 7px;
   border-top: 1px solid #edf2f6;
@@ -698,6 +708,10 @@ time {
 
 .event-row.is-click .event-icon {
   background: var(--amber);
+}
+
+.event-row.is-attachment .event-icon {
+  background: var(--teal);
 }
 
 .event-copy {

@@ -21,7 +21,7 @@ const TRANSPARENT_GIF = Buffer.from(
   "base64"
 );
 
-exports.api = onRequest(async (req, res) => {
+exports.api = onRequest({ timeoutSeconds: 3600 }, async (req, res) => {
   applyCors(req, res);
 
   if (req.method === "OPTIONS") {
@@ -39,6 +39,11 @@ exports.api = onRequest(async (req, res) => {
 
     if (req.method === "GET" && route === "/messages") {
       await listTrackedMessages(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && route === "/events") {
+      streamTrackedEvents(req, res);
       return;
     }
 
@@ -68,10 +73,13 @@ exports.click = onRequest({ secrets: [simpleTrackIpHashSalt] }, async (req, res)
 
   try {
     if (req.method === "GET") {
-      await recordEventFromRequest(req, "click", {
+      const kind = normalizeEventKind(req.query.k);
+      const eventType = isAttachmentEventKind(kind) ? "attachment_open" : "click";
+
+      await recordEventFromRequest(req, eventType, {
         url: cleanString(destination, 1000),
         label: cleanString(req.query.l, 240),
-        kind: normalizeEventKind(req.query.k)
+        kind
       });
     }
   } catch (error) {
@@ -102,6 +110,7 @@ async function createTrackedMessage(req, res) {
     status: "sent",
     opens: 0,
     clicks: 0,
+    attachmentOpens: 0,
     sentAt: now,
     lastActivityAt: null,
     lastOpenAt: null,
@@ -148,6 +157,70 @@ async function listTrackedMessages(req, res) {
   res.status(200).json({ ok: true, messages });
 }
 
+function streamTrackedEvents(req, res) {
+  const installId = cleanString(req.query.installId, 120);
+
+  if (!installId) {
+    res.status(400).json({ ok: false, error: "Missing installId" });
+    return;
+  }
+
+  res.set("Content-Type", "text/event-stream");
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
+  res.set("Connection", "keep-alive");
+  res.set("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+
+  let closed = false;
+
+  const sendEvent = (eventName, payload) => {
+    if (closed || res.destroyed) return;
+    res.write(`event: ${eventName}\n`);
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  const heartbeat = setInterval(() => {
+    if (closed || res.destroyed) return;
+    res.write(`: simple-track ${Date.now()}\n\n`);
+  }, 25000);
+
+  let unsubscribe = () => {};
+
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(heartbeat);
+    unsubscribe();
+  };
+
+  unsubscribe = db
+    .collection(TRACKED_MESSAGES)
+    .where("installId", "==", installId)
+    .limit(100)
+    .onSnapshot(
+      async (snapshot) => {
+        for (const change of snapshot.docChanges()) {
+          if (closed) return;
+          const message = await serializeMessageWithEffectiveStats(change.doc);
+          sendEvent("message", {
+            ok: true,
+            changeType: change.type,
+            message
+          });
+        }
+      },
+      (error) => {
+        logger.warn("Simple Track event stream failed", { error: error.message });
+        sendEvent("stream-error", { ok: false, error: "Event stream failed" });
+        cleanup();
+        res.end();
+      }
+    );
+
+  req.on("close", cleanup);
+  sendEvent("ready", { ok: true });
+}
+
 async function recordEventFromRequest(req, eventType, extraEvent = {}) {
   const messageId = cleanString(req.query.m, 160);
   const token = cleanString(req.query.t, 240);
@@ -191,7 +264,7 @@ async function recordEventFromRequest(req, eventType, extraEvent = {}) {
     };
 
     if (eventType === "open") {
-      updates.status = message.clicks > 0 ? "clicked" : "opened";
+      updates.status = Number(message.clicks || 0) > 0 ? "clicked" : "opened";
       updates.opens = FieldValue.increment(1);
       updates.lastOpenAt = now;
     }
@@ -200,6 +273,12 @@ async function recordEventFromRequest(req, eventType, extraEvent = {}) {
       updates.status = "clicked";
       updates.clicks = FieldValue.increment(1);
       updates.lastClickAt = now;
+    }
+
+    if (eventType === "attachment_open") {
+      updates.status = Number(message.clicks || 0) > 0 ? "clicked" : "opened";
+      updates.attachmentOpens = FieldValue.increment(1);
+      updates.lastAttachmentOpenAt = now;
     }
 
     transaction.set(messageRef.collection("events").doc(), event);
@@ -212,8 +291,9 @@ async function serializeMessageWithEffectiveStats(doc) {
   const serialized = serializeMessage(doc.id, data);
   const storedOpenCount = Number(data.opens || 0);
   const storedClickCount = Number(data.clicks || 0);
+  const storedAttachmentOpenCount = Number(data.attachmentOpens || 0);
 
-  if (storedOpenCount === 0 && storedClickCount === 0) {
+  if (storedOpenCount === 0 && storedClickCount === 0 && storedAttachmentOpenCount === 0) {
     return serialized;
   }
 
@@ -233,14 +313,16 @@ async function serializeMessageWithEffectiveStats(doc) {
 
   const trackedOpens = countableEvents.filter((event) => event.type === "open").length;
   const clicks = countableEvents.filter((event) => event.type === "click").length;
-  const opens = clicks > 0 ? Math.max(1, trackedOpens) : trackedOpens;
+  const attachmentOpens = countableEvents.filter((event) => event.type === "attachment_open").length;
+  const opens = clicks > 0 || attachmentOpens > 0 ? Math.max(1, trackedOpens) : trackedOpens;
   const lastEvent = countableEvents[countableEvents.length - 1] || null;
 
   return {
     ...serialized,
-    status: getStatusFromCounts(opens, clicks),
+    status: getStatusFromCounts(opens, clicks, attachmentOpens),
     opens,
     clicks,
+    attachmentOpens,
     lastActivityAt: toIsoString(lastEvent?.createdAt),
     device: lastEvent?.device || null,
     location: lastEvent?.location || null,
@@ -265,7 +347,7 @@ function isCountableEvent(message, event) {
   if (event.type === "open") {
     return !isWithinOpenGracePeriod(message, event.createdAt);
   }
-  return event.type === "click";
+  return event.type === "click" || event.type === "attachment_open";
 }
 
 function isWithinOpenGracePeriod(message, eventTime) {
@@ -278,15 +360,19 @@ function isWithinOpenGracePeriod(message, eventTime) {
   return age >= 0 && age < OPEN_GRACE_PERIOD_MS;
 }
 
-function getStatusFromCounts(opens, clicks) {
+function getStatusFromCounts(opens, clicks, attachmentOpens = 0) {
   if (clicks > 0) return "clicked";
-  if (opens > 0) return "opened";
+  if (opens > 0 || attachmentOpens > 0) return "opened";
   return "sent";
 }
 
 function normalizeEventKind(value) {
   const kind = cleanString(value, 20).toLowerCase();
   return ["link", "pdf", "document"].includes(kind) ? kind : "link";
+}
+
+function isAttachmentEventKind(kind) {
+  return kind === "pdf" || kind === "document";
 }
 
 function applyCors(req, res) {
@@ -332,6 +418,7 @@ function serializeMessage(id, data) {
     status: data.status || "sent",
     opens: Number(data.opens || 0),
     clicks: Number(data.clicks || 0),
+    attachmentOpens: Number(data.attachmentOpens || 0),
     sentAt: toIsoString(data.sentAt),
     lastActivityAt: toIsoString(data.lastActivityAt),
     device: data.device || null,

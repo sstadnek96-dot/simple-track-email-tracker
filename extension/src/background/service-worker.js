@@ -108,6 +108,7 @@ async function handleMessage(message) {
 
   if (message.type === "simpleTrack:getState") {
     const settings = await getSettings();
+    const installId = await getInstallId();
     let syncError = null;
     let messages = [];
 
@@ -118,7 +119,15 @@ async function handleMessage(message) {
       messages = await getMessages({ settings, syncBackend: false });
     }
 
-    return { ok: true, messages, settings, summary: summarize(messages), syncError };
+    return {
+      ok: true,
+      installId,
+      realtimeUrl: getRealtimeUrl(settings, installId),
+      messages,
+      settings,
+      summary: summarize(messages),
+      syncError
+    };
   }
 
   if (message.type === "simpleTrack:updateSettings") {
@@ -406,6 +415,7 @@ function normalizeMessage(message) {
     status: ["sent", "opened", "clicked"].includes(message.status) ? message.status : "sent",
     opens: Number(message.opens || 0),
     clicks: Number(message.clicks || 0),
+    attachmentOpens: Number(message.attachmentOpens || 0),
     lastActivityAt: message.lastActivityAt || null,
     sentAt: message.sentAt || new Date().toISOString(),
     rowMatchAfter: message.rowMatchAfter || null,
@@ -420,13 +430,23 @@ function summarize(messages) {
   const sent = messages.length;
   const opened = messages.filter((message) => message.opens > 0).length;
   const clicked = messages.filter((message) => message.clicks > 0).length;
+  const attachmentOpened = messages.filter((message) => message.attachmentOpens > 0).length;
   const unopened = Math.max(0, sent - opened);
 
   return {
     sent,
     opened,
     clicked,
+    attachmentOpened,
     unopened,
     openRate: sent > 0 ? Math.round((opened / sent) * 100) : 0
   };
+}
+
+function getRealtimeUrl(settings, installId) {
+  if (!settings.backendBaseUrl || !installId) return null;
+
+  const url = new URL(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/events`);
+  url.searchParams.set("installId", installId);
+  return url.toString();
 }

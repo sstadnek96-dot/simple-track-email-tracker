@@ -56,6 +56,11 @@
           <span id="clickedCount">0</span>
           <p>Clicks</p>
         </article>
+        <article>
+          <span class="stat-dot files"></span>
+          <span id="attachmentCount">0</span>
+          <p>Files</p>
+        </article>
       </section>
 
       <div class="toolbar">
@@ -74,6 +79,7 @@
         <button class="tab" data-filter="opened" type="button">Opened</button>
         <button class="tab" data-filter="unopened" type="button">Unread</button>
         <button class="tab" data-filter="clicked" type="button">Clicks</button>
+        <button class="tab" data-filter="files" type="button">Files</button>
       </nav>
 
       <section class="activity-list" id="activityList" aria-label="Tracked messages"></section>
@@ -99,6 +105,7 @@
           <div class="report-metrics">
             <span><strong class="opens"></strong><em>Opens</em></span>
             <span><strong class="clicks"></strong><em>Clicks</em></span>
+            <span><strong class="attachment-opens"></strong><em>Files</em></span>
             <span><strong class="status-value"></strong><em>Status</em></span>
           </div>
           <div class="event-section">
