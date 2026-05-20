@@ -275,6 +275,7 @@
           composeRoot.dataset.simpleTrackPreparing = "true";
 
           const details = extractComposeDetails(composeRoot);
+          let trackingResponse = null;
 
           try {
             const response = await sendMessage({
@@ -285,6 +286,7 @@
             });
 
             if (response?.ok) {
+              trackingResponse = response;
               injectTrackingAssets(composeRoot, response.tracking);
             }
           } catch (error) {
@@ -292,19 +294,65 @@
           }
 
           sendButton.dataset.simpleTrackPrepared = "true";
-
-          window.setTimeout(() => {
-            sendButton.click();
-          }, 250);
+          sendButton.click();
 
           window.setTimeout(() => {
             delete sendButton.dataset.simpleTrackPrepared;
             delete composeRoot.dataset.simpleTrackPreparing;
           }, 3000);
+
+          if (trackingResponse?.tracking?.activationUrl) {
+            const didSend = await waitForSendCompletion(composeRoot, sendButton);
+            if (didSend) {
+              activateTrackedMessage(trackingResponse);
+            }
+          }
         },
         true
       );
     }
+  }
+
+  function waitForSendCompletion(composeRoot, sendButton) {
+    return new Promise((resolve) => {
+      const startedAt = Date.now();
+      const timeoutMs = 10000;
+
+      const check = () => {
+        if (!composeRoot.isConnected || !sendButton.isConnected || isElementHidden(composeRoot)) {
+          resolve(true);
+          return;
+        }
+
+        if (Date.now() - startedAt >= timeoutMs) {
+          resolve(false);
+          return;
+        }
+
+        window.setTimeout(check, 80);
+      };
+
+      check();
+    });
+  }
+
+  function isElementHidden(element) {
+    const rect = element.getBoundingClientRect();
+    return rect.width === 0 || rect.height === 0 || getComputedStyle(element).visibility === "hidden";
+  }
+
+  function activateTrackedMessage(response) {
+    sendMessage({
+      type: "simpleTrack:activateTrackedMessage",
+      id: response.message?.id,
+      activationUrl: response.tracking.activationUrl
+    }).then((activationResponse) => {
+      if (activationResponse?.ok) {
+        refreshState().then(queueDecorate);
+      }
+    }).catch((error) => {
+      console.warn("Simple Track could not activate tracking after send", error);
+    });
   }
 
   function getMessageRows() {

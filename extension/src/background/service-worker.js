@@ -145,6 +145,10 @@ async function handleMessage(message) {
     return createTrackedMessage(message);
   }
 
+  if (message.type === "simpleTrack:activateTrackedMessage") {
+    return activateTrackedMessage(message);
+  }
+
   if (message.type === "simpleTrack:setMuted") {
     const messages = await getMessages();
     const updatedMessages = messages.map((trackedMessage) => {
@@ -192,6 +196,7 @@ async function createTrackedMessage(message) {
   if (settings.backendBaseUrl) {
     const installId = await getInstallId();
     const backendResponse = await createBackendMessage(settings, installId, draftMessage);
+    backendResponse.tracking = normalizeTrackingResponse(settings, backendResponse);
     const nextMessage = normalizeMessage({
       ...backendResponse.message,
       rowMatchAfter: new Date(Date.now() + ROW_MATCH_DELAY_MS).toISOString()
@@ -211,6 +216,31 @@ async function createTrackedMessage(message) {
   });
 
   return { ok: true, message: nextMessage, tracking: null };
+}
+
+async function activateTrackedMessage(message) {
+  if (!message.activationUrl) {
+    return { ok: false, error: "Missing activation URL" };
+  }
+
+  const response = await fetch(message.activationUrl, {
+    method: "POST",
+    headers: getBackendHeaders(await getSettings())
+  });
+  const body = await response.json().catch(() => null);
+
+  if (!response.ok || !body?.ok) {
+    throw new Error(body?.error || `Tracking activation failed (${response.status})`);
+  }
+
+  if (body.message) {
+    const messages = await getMessages();
+    const mergedMessages = upsertMessages(messages, [normalizeMessage(body.message)]);
+    await chrome.storage.local.set({ [STORAGE_KEYS.messages]: mergedMessages });
+    return { ok: true, message: normalizeMessage(body.message) };
+  }
+
+  return { ok: true };
 }
 
 async function ensureSeedData() {
@@ -309,6 +339,21 @@ async function createBackendMessage(settings, installId, draftMessage) {
   }
 
   return body;
+}
+
+function normalizeTrackingResponse(settings, backendResponse) {
+  const tracking = { ...(backendResponse.tracking || {}) };
+
+  if (!tracking.activationUrl && tracking.pixelUrl && backendResponse.message?.id) {
+    const pixelUrl = new URL(tracking.pixelUrl);
+    const token = pixelUrl.searchParams.get("t");
+    const activationUrl = new URL(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/messages/activate`);
+    activationUrl.searchParams.set("m", backendResponse.message.id);
+    activationUrl.searchParams.set("t", token || "");
+    tracking.activationUrl = activationUrl.toString();
+  }
+
+  return tracking;
 }
 
 async function fetchBackendMessages(settings, installId) {

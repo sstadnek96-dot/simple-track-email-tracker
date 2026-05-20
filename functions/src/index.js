@@ -15,8 +15,8 @@ setGlobalOptions({
 const db = getFirestore();
 const simpleTrackIpHashSalt = defineSecret("SIMPLE_TRACK_IP_HASH_SALT");
 const TRACKED_MESSAGES = "trackedMessages";
-const OPEN_GRACE_PERIOD_MS = Number(process.env.SIMPLE_TRACK_OPEN_GRACE_PERIOD_MS || 15000);
-const INTERACTION_GRACE_PERIOD_MS = Number(process.env.SIMPLE_TRACK_INTERACTION_GRACE_PERIOD_MS || 30000);
+const OPEN_GRACE_PERIOD_MS = Number(process.env.SIMPLE_TRACK_OPEN_GRACE_PERIOD_MS || 0);
+const INTERACTION_GRACE_PERIOD_MS = Number(process.env.SIMPLE_TRACK_INTERACTION_GRACE_PERIOD_MS || 0);
 const TRANSPARENT_GIF = Buffer.from(
   "R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==",
   "base64"
@@ -35,6 +35,11 @@ exports.api = onRequest({ timeoutSeconds: 3600 }, async (req, res) => {
 
     if (req.method === "POST" && route === "/messages") {
       await createTrackedMessage(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && route === "/messages/activate") {
+      await activateTrackedMessage(req, res);
       return;
     }
 
@@ -124,8 +129,10 @@ async function createTrackedMessage(req, res) {
   await docRef.set(message);
 
   const publicBaseUrl = getPublicBaseUrl(req);
+  const apiBaseUrl = `${publicBaseUrl}/api`;
   const pixelUrl = `${publicBaseUrl}/pixel?m=${encodeURIComponent(docRef.id)}&t=${encodeURIComponent(trackingToken)}`;
   const clickPrefix = `${publicBaseUrl}/click?m=${encodeURIComponent(docRef.id)}&t=${encodeURIComponent(trackingToken)}&u=`;
+  const activationUrl = `${apiBaseUrl}/messages/activate?m=${encodeURIComponent(docRef.id)}&t=${encodeURIComponent(trackingToken)}`;
 
   res.status(201).json({
     ok: true,
@@ -133,8 +140,49 @@ async function createTrackedMessage(req, res) {
     tracking: {
       pixelUrl,
       clickPrefix,
+      activationUrl,
       pixelHtml: `<img src="${escapeHtml(pixelUrl)}" width="1" height="1" alt="" style="width:1px;height:1px;opacity:0;border:0;display:block;" />`
     }
+  });
+}
+
+async function activateTrackedMessage(req, res) {
+  const messageId = cleanString(req.query.m, 160);
+  const token = cleanString(req.query.t, 240);
+
+  if (!messageId || !token) {
+    res.status(400).json({ ok: false, error: "Missing activation token" });
+    return;
+  }
+
+  const messageRef = db.collection(TRACKED_MESSAGES).doc(messageId);
+  const now = Timestamp.now();
+  let activated = false;
+
+  await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(messageRef);
+    if (!snapshot.exists) return;
+
+    const message = snapshot.data();
+    if (message.trackingTokenHash !== hashSecret(token)) return;
+
+    activated = true;
+    transaction.update(messageRef, {
+      activatedAt: message.activatedAt || now,
+      sentAt: message.activatedAt ? message.sentAt : now,
+      updatedAt: now
+    });
+  });
+
+  if (!activated) {
+    res.status(404).json({ ok: false, error: "Tracked message not found" });
+    return;
+  }
+
+  const snapshot = await messageRef.get();
+  res.status(200).json({
+    ok: true,
+    message: await serializeMessageWithEffectiveStats(snapshot)
   });
 }
 
@@ -248,11 +296,21 @@ async function recordEventFromRequest(req, eventType, extraEvent = {}) {
     const message = snapshot.data();
     if (message.trackingTokenHash !== hashSecret(token)) return;
 
-    if (shouldIgnoreEarlyEvent(message, eventType, now)) {
+    if (!message.activatedAt) {
       transaction.set(messageRef.collection("events").doc(), {
         ...event,
         ignored: true,
-        ignoreReason: getEarlyEventIgnoreReason(eventType)
+        ignoreReason: "not_activated"
+      });
+      return;
+    }
+
+    const ignoreReason = getEventIgnoreReason(message, event, eventType, now);
+    if (ignoreReason) {
+      transaction.set(messageRef.collection("events").doc(), {
+        ...event,
+        ignored: true,
+        ignoreReason
       });
       return;
     }
@@ -345,22 +403,22 @@ function serializeEvent(event) {
 
 function isCountableEvent(message, event) {
   if (!event || event.ignored) return false;
-  if (event.type === "open" || event.type === "click" || event.type === "attachment_open") {
-    return !shouldIgnoreEarlyEvent(message, event.type, event.createdAt);
-  }
+  if (event.type === "open" || event.type === "click" || event.type === "attachment_open") return true;
   return false;
 }
 
-function shouldIgnoreEarlyEvent(message, eventType, eventTime) {
+function getEventIgnoreReason(message, event, eventType, eventTime) {
   if (eventType === "open") {
-    return isWithinGracePeriod(message, eventTime, OPEN_GRACE_PERIOD_MS);
+    return isWithinGracePeriod(message, eventTime, OPEN_GRACE_PERIOD_MS) ? "open_grace_period" : "";
   }
 
   if (eventType === "click" || eventType === "attachment_open") {
-    return isWithinGracePeriod(message, eventTime, INTERACTION_GRACE_PERIOD_MS);
+    return isWithinGracePeriod(message, eventTime, INTERACTION_GRACE_PERIOD_MS)
+      ? getEarlyEventIgnoreReason(eventType)
+      : "";
   }
 
-  return false;
+  return "";
 }
 
 function getEarlyEventIgnoreReason(eventType) {
