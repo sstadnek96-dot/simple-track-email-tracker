@@ -22,7 +22,7 @@ const TRANSPARENT_GIF = Buffer.from(
   "base64"
 );
 
-exports.api = onRequest({ timeoutSeconds: 3600 }, async (req, res) => {
+exports.api = onRequest({ secrets: [simpleTrackIpHashSalt], timeoutSeconds: 3600 }, async (req, res) => {
   applyCors(req, res);
 
   if (req.method === "OPTIONS") {
@@ -113,6 +113,7 @@ async function createTrackedMessage(req, res) {
     recipients,
     client,
     trackingTokenHash: hashSecret(trackingToken),
+    senderFingerprint: getRequestFingerprint(req),
     status: "sent",
     opens: 0,
     clicks: 0,
@@ -284,6 +285,7 @@ async function recordEventFromRequest(req, eventType, extraEvent = {}) {
     userAgent: cleanString(req.get("user-agent"), 500),
     referer: cleanString(req.get("referer"), 500),
     ipHash: hashIp(getRequestIp(req)),
+    requestFingerprint: getRequestFingerprint(req),
     device: summarizeUserAgent(req.get("user-agent")),
     location: getRequestLocation(req),
     ...extraEvent
@@ -403,11 +405,14 @@ function serializeEvent(event) {
 
 function isCountableEvent(message, event) {
   if (!event || event.ignored) return false;
-  if (event.type === "open" || event.type === "click" || event.type === "attachment_open") return true;
+  if (event.type === "open") return !isSenderDirectOpen(message, event);
+  if (event.type === "click" || event.type === "attachment_open") return true;
   return false;
 }
 
 function getEventIgnoreReason(message, event, eventType, eventTime) {
+  if (eventType === "open" && isSenderDirectOpen(message, event)) return "sender_direct_open";
+
   if (eventType === "open") {
     return isWithinGracePeriod(message, eventTime, OPEN_GRACE_PERIOD_MS) ? "open_grace_period" : "";
   }
@@ -426,6 +431,23 @@ function getEarlyEventIgnoreReason(eventType) {
   if (eventType === "click") return "click_grace_period";
   if (eventType === "attachment_open") return "attachment_grace_period";
   return "event_grace_period";
+}
+
+function isSenderDirectOpen(message, event) {
+  return Boolean(
+    message.senderFingerprint &&
+    event.requestFingerprint &&
+    message.senderFingerprint === event.requestFingerprint &&
+    !isKnownImageProxy(event.userAgent)
+  );
+}
+
+function isKnownImageProxy(userAgent) {
+  const value = String(userAgent || "").toLowerCase();
+  return value.includes("googleimageproxy") ||
+    value.includes("google image proxy") ||
+    value.includes("microsoft outlook") ||
+    value.includes("microsoft office");
 }
 
 function isWithinGracePeriod(message, eventTime, gracePeriodMs) {
@@ -537,6 +559,13 @@ function hashIp(ip) {
   if (!ip) return null;
   const salt = process.env.SIMPLE_TRACK_IP_HASH_SALT || "simple-track-dev-salt";
   return crypto.createHash("sha256").update(`${salt}:${ip}`).digest("hex");
+}
+
+function getRequestFingerprint(req) {
+  const ipHash = hashIp(getRequestIp(req));
+  const userAgent = cleanString(req.get("user-agent"), 500);
+  if (!ipHash || !userAgent) return null;
+  return hashSecret(`${ipHash}:${userAgent}`);
 }
 
 function getRequestIp(req) {
