@@ -7,6 +7,8 @@ const STORAGE_KEYS = {
 
 const PRODUCTION_API_URL = "https://us-central1-simple-track-prod.cloudfunctions.net/api";
 const ROW_MATCH_DELAY_MS = 3500;
+const BACKEND_REFRESH_ALARM_MINUTES = 15;
+const SIMULATE_ACTIVITY_ALARM_MINUTES = 2;
 
 const DEFAULT_SETTINGS = {
   trackingEnabled: true,
@@ -68,27 +70,41 @@ const SAMPLE_MESSAGES = [
 
 chrome.runtime.onInstalled.addListener(() => {
   ensureSeedData();
-  chrome.alarms.create("simpleTrack.refreshBackend", { periodInMinutes: 1 });
-  chrome.alarms.create("simpleTrack.simulateActivity", { periodInMinutes: 2 });
+  configureAlarms();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureSeedData();
-  chrome.alarms.create("simpleTrack.refreshBackend", { periodInMinutes: 1 });
-  chrome.alarms.create("simpleTrack.simulateActivity", { periodInMinutes: 2 });
+  configureAlarms();
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "simpleTrack.refreshBackend") {
-    refreshBackendMessages().catch((error) => {
-      console.warn("Simple Track backend refresh failed", error);
-    });
+    refreshBackendMessagesForNotifications();
   }
 
   if (alarm.name === "simpleTrack.simulateActivity") {
     simulateTrackingActivity();
   }
 });
+
+function configureAlarms() {
+  chrome.alarms.clear("simpleTrack.refreshBackend", () => {
+    chrome.alarms.create("simpleTrack.refreshBackend", { periodInMinutes: BACKEND_REFRESH_ALARM_MINUTES });
+  });
+  chrome.alarms.clear("simpleTrack.simulateActivity", () => {
+    chrome.alarms.create("simpleTrack.simulateActivity", { periodInMinutes: SIMULATE_ACTIVITY_ALARM_MINUTES });
+  });
+}
+
+async function refreshBackendMessagesForNotifications() {
+  const settings = await getSettings();
+  if (!settings.notificationsEnabled || !settings.backendBaseUrl) return;
+
+  refreshBackendMessages(settings).catch((error) => {
+    console.warn("Simple Track backend refresh failed", error);
+  });
+}
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   handleMessage(message)

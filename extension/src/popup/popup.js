@@ -41,9 +41,12 @@ let currentSearch = "";
 let popupRefreshTimer = null;
 let realtimeSource = null;
 let activeRealtimeUrl = null;
+let realtimeConnected = false;
+let lastFullStateRefreshAt = 0;
 let openMessageIds = new Set();
 
 const POPUP_REFRESH_MS = 2500;
+const REALTIME_HEALTH_REFRESH_MS = 5 * 60 * 1000;
 
 const elements = {
   openRate: document.querySelector("#openRate"),
@@ -64,6 +67,7 @@ document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
   currentState = await getState();
+  lastFullStateRefreshAt = Date.now();
   render();
   syncRealtimeStream(currentState.realtimeUrl);
 
@@ -112,6 +116,7 @@ async function init() {
 async function getState() {
   const response = await sendMessage({ type: "simpleTrack:getState" });
   if (!response?.ok) return fallbackState;
+  lastFullStateRefreshAt = Date.now();
   return response;
 }
 
@@ -141,6 +146,7 @@ function stopPopupRefresh() {
 
 async function refreshPopupState() {
   if (document.hidden) return;
+  if (!shouldRefreshFromBackend()) return;
   const nextState = await getState();
   if (!nextState?.ok) return;
   currentState = nextState;
@@ -160,9 +166,14 @@ function syncRealtimeStream(nextUrl) {
 
   closeRealtimeStream();
 
+  realtimeConnected = false;
   realtimeSource = new EventSource(activeRealtimeUrl);
+  realtimeSource.addEventListener("ready", () => {
+    realtimeConnected = true;
+  });
   realtimeSource.addEventListener("message", (event) => {
     try {
+      realtimeConnected = true;
       const payload = JSON.parse(event.data);
       if (payload?.message) {
         applyRealtimeMessage(payload.message);
@@ -172,12 +183,29 @@ function syncRealtimeStream(nextUrl) {
     }
   });
   realtimeSource.addEventListener("stream-error", closeRealtimeStream);
+  realtimeSource.addEventListener("error", () => {
+    realtimeConnected = false;
+  });
 }
 
 function closeRealtimeStream() {
+  realtimeConnected = false;
   if (!realtimeSource) return;
   realtimeSource.close();
   realtimeSource = null;
+}
+
+function shouldRefreshFromBackend() {
+  return !isRealtimeHealthy() || Date.now() - lastFullStateRefreshAt >= REALTIME_HEALTH_REFRESH_MS;
+}
+
+function isRealtimeHealthy() {
+  return Boolean(
+    realtimeConnected &&
+    realtimeSource &&
+    globalThis.EventSource &&
+    realtimeSource.readyState !== EventSource.CLOSED
+  );
 }
 
 function applyRealtimeMessage(message) {

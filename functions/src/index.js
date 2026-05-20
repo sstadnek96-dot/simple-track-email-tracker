@@ -342,6 +342,12 @@ async function recordEventFromRequest(req, eventType, extraEvent = {}) {
       updates.lastAttachmentOpenAt = now;
     }
 
+    updates.latestEvent = toPublicEvent(event);
+    updates.recentEvents = [
+      updates.latestEvent,
+      ...(Array.isArray(message.recentEvents) ? message.recentEvents : [])
+    ].slice(0, 20);
+
     transaction.set(messageRef.collection("events").doc(), event);
     transaction.update(messageRef, updates);
   });
@@ -353,6 +359,22 @@ async function serializeMessageWithEffectiveStats(doc) {
   const storedOpenCount = Number(data.opens || 0);
   const storedClickCount = Number(data.clicks || 0);
   const storedAttachmentOpenCount = Number(data.attachmentOpens || 0);
+  const storedEvents = getStoredRecentEvents(data);
+
+  if (storedEvents.length > 0 || data.latestEvent) {
+    const opens = storedClickCount > 0 || storedAttachmentOpenCount > 0
+      ? Math.max(1, storedOpenCount)
+      : storedOpenCount;
+
+    return {
+      ...serialized,
+      status: getStatusFromCounts(opens, storedClickCount, storedAttachmentOpenCount),
+      opens,
+      clicks: storedClickCount,
+      attachmentOpens: storedAttachmentOpenCount,
+      events: storedEvents
+    };
+  }
 
   if (storedOpenCount === 0 && storedClickCount === 0 && storedAttachmentOpenCount === 0) {
     return serialized;
@@ -392,6 +414,22 @@ async function serializeMessageWithEffectiveStats(doc) {
 }
 
 function serializeEvent(event) {
+  return serializePublicEvent(event);
+}
+
+function toPublicEvent(event) {
+  return {
+    type: event.type,
+    createdAt: event.createdAt,
+    device: event.device || null,
+    location: event.location || null,
+    label: event.label || null,
+    kind: event.kind || null,
+    url: event.url || null
+  };
+}
+
+function serializePublicEvent(event) {
   return {
     type: event.type,
     createdAt: toIsoString(event.createdAt),
@@ -401,6 +439,15 @@ function serializeEvent(event) {
     kind: event.kind || null,
     url: event.url || null
   };
+}
+
+function getStoredRecentEvents(data) {
+  if (Array.isArray(data.recentEvents) && data.recentEvents.length > 0) {
+    return data.recentEvents.slice(0, 20).map(serializePublicEvent);
+  }
+
+  if (data.latestEvent) return [serializePublicEvent(data.latestEvent)];
+  return [];
 }
 
 function isCountableEvent(message, event) {
@@ -523,7 +570,7 @@ function serializeMessage(id, data) {
     lastActivityAt: toIsoString(data.lastActivityAt),
     device: data.device || null,
     location: data.location || null,
-    events: [],
+    events: getStoredRecentEvents(data),
     muted: Boolean(data.muted)
   };
 }

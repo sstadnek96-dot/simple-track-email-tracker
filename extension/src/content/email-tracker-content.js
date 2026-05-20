@@ -27,6 +27,7 @@
   const ACTIVE_STATE_REFRESH_MS = 2500;
   const BACKGROUND_STATE_REFRESH_MS = 30000;
   const HOVER_STATE_REFRESH_MS = 1500;
+  const REALTIME_HEALTH_REFRESH_MS = 5 * 60 * 1000;
   const DOCUMENT_EXTENSION_PATTERN = /\.(pdf|docx?|xlsx?|pptx?|csv|rtf|txt|pages|numbers|key)(?:$|[?#])/i;
   const DOCUMENT_LABEL_PATTERN = /\.(pdf|docx?|xlsx?|pptx?|csv|rtf|txt|pages|numbers|key)\b/i;
 
@@ -41,6 +42,8 @@
   let stateRefreshInFlight = null;
   let realtimeSource = null;
   let activeRealtimeUrl = null;
+  let realtimeConnected = false;
+  let lastFullStateRefreshAt = 0;
   let lastHoverStateRefreshAt = 0;
   let lastLocation = location.href;
 
@@ -84,7 +87,13 @@
       chrome.storage.onChanged.addListener((changes, areaName) => {
         if (areaName !== "local") return;
         if (changes["simpleTrack.messages"] || changes["simpleTrack.settings"]) {
-          refreshState().then(queueDecorate);
+          if (Array.isArray(changes["simpleTrack.messages"]?.newValue)) {
+            cachedMessages = changes["simpleTrack.messages"].newValue;
+          }
+          if (changes["simpleTrack.settings"]?.newValue) {
+            cachedSettings = changes["simpleTrack.settings"].newValue;
+          }
+          queueDecorate();
         }
       });
     }
@@ -95,6 +104,7 @@
   async function refreshState() {
     const response = await sendMessage({ type: "simpleTrack:getState" });
     if (!response?.ok) return;
+    lastFullStateRefreshAt = Date.now();
     cachedMessages = response.messages || [];
     cachedSettings = response.settings || {};
     syncRealtimeStream(response.realtimeUrl);
@@ -112,9 +122,15 @@
 
     closeRealtimeStream();
 
+    realtimeConnected = false;
     realtimeSource = new EventSource(activeRealtimeUrl);
+    realtimeSource.addEventListener("ready", () => {
+      realtimeConnected = true;
+      scheduleStateRefresh(getStateRefreshDelay());
+    });
     realtimeSource.addEventListener("message", (event) => {
       try {
+        realtimeConnected = true;
         const payload = JSON.parse(event.data);
         if (payload?.message) {
           applyRealtimeMessage(payload.message);
@@ -126,9 +142,14 @@
     realtimeSource.addEventListener("stream-error", () => {
       closeRealtimeStream();
     });
+    realtimeSource.addEventListener("error", () => {
+      realtimeConnected = false;
+      scheduleStateRefresh(ACTIVE_STATE_REFRESH_MS);
+    });
   }
 
   function closeRealtimeStream() {
+    realtimeConnected = false;
     if (!realtimeSource) return;
     realtimeSource.close();
     realtimeSource = null;
@@ -177,7 +198,9 @@
     }
 
     if (document.hidden) return;
-    await refreshStateOnce();
+    if (shouldRefreshFromBackend()) {
+      await refreshStateOnce();
+    }
     queueDecorate();
     refreshActiveHoverCard();
   }
@@ -194,8 +217,22 @@
 
   function getStateRefreshDelay() {
     if (document.hidden) return BACKGROUND_STATE_REFRESH_MS;
+    if (isRealtimeHealthy()) return REALTIME_HEALTH_REFRESH_MS;
     if (isSentFolderView()) return ACTIVE_STATE_REFRESH_MS;
     return BACKGROUND_STATE_REFRESH_MS;
+  }
+
+  function shouldRefreshFromBackend() {
+    return !isRealtimeHealthy() || Date.now() - lastFullStateRefreshAt >= REALTIME_HEALTH_REFRESH_MS;
+  }
+
+  function isRealtimeHealthy() {
+    return Boolean(
+      realtimeConnected &&
+      realtimeSource &&
+      globalThis.EventSource &&
+      realtimeSource.readyState !== EventSource.CLOSED
+    );
   }
 
   function queueDecorate() {
@@ -815,6 +852,8 @@
   }
 
   async function refreshHoverStateForBadge(badge) {
+    if (isRealtimeHealthy()) return;
+
     const now = Date.now();
     if (now - lastHoverStateRefreshAt < HOVER_STATE_REFRESH_MS) return;
     lastHoverStateRefreshAt = now;
