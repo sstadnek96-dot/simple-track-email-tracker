@@ -231,8 +231,9 @@ async function serializeMessageWithEffectiveStats(doc) {
     .map((eventDoc) => eventDoc.data())
     .filter((event) => isCountableEvent(data, event));
 
-  const opens = countableEvents.filter((event) => event.type === "open").length;
+  const trackedOpens = countableEvents.filter((event) => event.type === "open").length;
   const clicks = countableEvents.filter((event) => event.type === "click").length;
+  const opens = clicks > 0 ? Math.max(1, trackedOpens) : trackedOpens;
   const lastEvent = countableEvents[countableEvents.length - 1] || null;
 
   return {
