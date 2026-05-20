@@ -16,6 +16,7 @@ const db = getFirestore();
 const simpleTrackIpHashSalt = defineSecret("SIMPLE_TRACK_IP_HASH_SALT");
 const TRACKED_MESSAGES = "trackedMessages";
 const OPEN_GRACE_PERIOD_MS = Number(process.env.SIMPLE_TRACK_OPEN_GRACE_PERIOD_MS || 15000);
+const INTERACTION_GRACE_PERIOD_MS = Number(process.env.SIMPLE_TRACK_INTERACTION_GRACE_PERIOD_MS || 30000);
 const TRANSPARENT_GIF = Buffer.from(
   "R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==",
   "base64"
@@ -247,11 +248,11 @@ async function recordEventFromRequest(req, eventType, extraEvent = {}) {
     const message = snapshot.data();
     if (message.trackingTokenHash !== hashSecret(token)) return;
 
-    if (eventType === "open" && isWithinOpenGracePeriod(message, now)) {
+    if (shouldIgnoreEarlyEvent(message, eventType, now)) {
       transaction.set(messageRef.collection("events").doc(), {
         ...event,
         ignored: true,
-        ignoreReason: "open_grace_period"
+        ignoreReason: getEarlyEventIgnoreReason(eventType)
       });
       return;
     }
@@ -344,20 +345,39 @@ function serializeEvent(event) {
 
 function isCountableEvent(message, event) {
   if (!event || event.ignored) return false;
-  if (event.type === "open") {
-    return !isWithinOpenGracePeriod(message, event.createdAt);
+  if (event.type === "open" || event.type === "click" || event.type === "attachment_open") {
+    return !shouldIgnoreEarlyEvent(message, event.type, event.createdAt);
   }
-  return event.type === "click" || event.type === "attachment_open";
+  return false;
 }
 
-function isWithinOpenGracePeriod(message, eventTime) {
+function shouldIgnoreEarlyEvent(message, eventType, eventTime) {
+  if (eventType === "open") {
+    return isWithinGracePeriod(message, eventTime, OPEN_GRACE_PERIOD_MS);
+  }
+
+  if (eventType === "click" || eventType === "attachment_open") {
+    return isWithinGracePeriod(message, eventTime, INTERACTION_GRACE_PERIOD_MS);
+  }
+
+  return false;
+}
+
+function getEarlyEventIgnoreReason(eventType) {
+  if (eventType === "open") return "open_grace_period";
+  if (eventType === "click") return "click_grace_period";
+  if (eventType === "attachment_open") return "attachment_grace_period";
+  return "event_grace_period";
+}
+
+function isWithinGracePeriod(message, eventTime, gracePeriodMs) {
   const sentAt = toDate(message.sentAt || message.createdAt);
   const occurredAt = toDate(eventTime);
 
   if (!sentAt || !occurredAt) return false;
 
   const age = occurredAt.getTime() - sentAt.getTime();
-  return age >= 0 && age < OPEN_GRACE_PERIOD_MS;
+  return age >= 0 && age < gracePeriodMs;
 }
 
 function getStatusFromCounts(opens, clicks, attachmentOpens = 0) {
