@@ -302,15 +302,27 @@
           }, 3000);
 
           if (trackingResponse?.tracking?.activationUrl) {
-            const didSend = await waitForSendCompletion(composeRoot, sendButton);
-            if (didSend) {
-              activateTrackedMessage(trackingResponse);
-            }
+            scheduleTrackedMessageActivation(trackingResponse, composeRoot, sendButton);
           }
         },
         true
       );
     }
+  }
+
+  function scheduleTrackedMessageActivation(response, composeRoot, sendButton) {
+    let activated = false;
+    const activateOnce = () => {
+      if (activated) return;
+      activated = true;
+      activateTrackedMessage(response);
+    };
+
+    window.setTimeout(activateOnce, 350);
+
+    waitForSendCompletion(composeRoot, sendButton).then((didSend) => {
+      if (didSend) activateOnce();
+    });
   }
 
   function waitForSendCompletion(composeRoot, sendButton) {
