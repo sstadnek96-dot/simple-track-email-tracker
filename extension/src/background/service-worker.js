@@ -1,7 +1,8 @@
 const STORAGE_KEYS = {
   messages: "simpleTrack.messages",
   settings: "simpleTrack.settings",
-  installId: "simpleTrack.installId"
+  installId: "simpleTrack.installId",
+  deletedMessageIds: "simpleTrack.deletedMessageIds"
 };
 
 const PRODUCTION_API_URL = "https://us-central1-simple-track-prod.cloudfunctions.net/api";
@@ -146,6 +147,19 @@ async function handleMessage(message) {
     return { ok: true, messages: updatedMessages };
   }
 
+  if (message.type === "simpleTrack:deleteMessage") {
+    const deletedIds = await getDeletedMessageIds();
+    deletedIds.add(String(message.id));
+    const messages = (await getMessages()).filter((trackedMessage) => trackedMessage.id !== message.id);
+
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.deletedMessageIds]: [...deletedIds],
+      [STORAGE_KEYS.messages]: messages
+    });
+
+    return { ok: true, messages };
+  }
+
   return { ok: false, error: `Unknown message type: ${message.type}` };
 }
 
@@ -225,7 +239,13 @@ async function getMessages(options = {}) {
     messages = await refreshBackendMessages(options.settings, messages);
   }
 
-  return messages;
+  const deletedIds = await getDeletedMessageIds();
+  return messages.filter((message) => !deletedIds.has(message.id));
+}
+
+async function getDeletedMessageIds() {
+  const result = await chrome.storage.local.get(STORAGE_KEYS.deletedMessageIds);
+  return new Set(Array.isArray(result[STORAGE_KEYS.deletedMessageIds]) ? result[STORAGE_KEYS.deletedMessageIds] : []);
 }
 
 async function getSettings() {
@@ -250,8 +270,10 @@ async function refreshBackendMessages(settings = null, currentMessages = null) {
 
   const installId = await getInstallId();
   const localMessages = currentMessages || (await getMessages());
+  const deletedIds = await getDeletedMessageIds();
   const backendMessages = await fetchBackendMessages(activeSettings, installId);
-  const mergedMessages = upsertMessages(localMessages, backendMessages.map(normalizeMessage));
+  const mergedMessages = upsertMessages(localMessages, backendMessages.map(normalizeMessage))
+    .filter((message) => !deletedIds.has(message.id));
 
   await chrome.storage.local.set({ [STORAGE_KEYS.messages]: mergedMessages });
   notifyForNewOpens(localMessages, mergedMessages, activeSettings);
@@ -389,6 +411,7 @@ function normalizeMessage(message) {
     rowMatchAfter: message.rowMatchAfter || null,
     device: message.device || null,
     location: message.location || null,
+    events: Array.isArray(message.events) ? message.events : [],
     muted: Boolean(message.muted)
   };
 }

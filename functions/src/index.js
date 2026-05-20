@@ -68,7 +68,11 @@ exports.click = onRequest({ secrets: [simpleTrackIpHashSalt] }, async (req, res)
 
   try {
     if (req.method === "GET") {
-      await recordEventFromRequest(req, "click");
+      await recordEventFromRequest(req, "click", {
+        url: cleanString(destination, 1000),
+        label: cleanString(req.query.l, 240),
+        kind: normalizeEventKind(req.query.k)
+      });
     }
   } catch (error) {
     logger.warn("Click event was not recorded", { error: error.message });
@@ -144,7 +148,7 @@ async function listTrackedMessages(req, res) {
   res.status(200).json({ ok: true, messages });
 }
 
-async function recordEventFromRequest(req, eventType) {
+async function recordEventFromRequest(req, eventType, extraEvent = {}) {
   const messageId = cleanString(req.query.m, 160);
   const token = cleanString(req.query.t, 240);
 
@@ -159,7 +163,8 @@ async function recordEventFromRequest(req, eventType) {
     referer: cleanString(req.get("referer"), 500),
     ipHash: hashIp(getRequestIp(req)),
     device: summarizeUserAgent(req.get("user-agent")),
-    location: getRequestLocation(req)
+    location: getRequestLocation(req),
+    ...extraEvent
   };
 
   await db.runTransaction(async (transaction) => {
@@ -237,7 +242,20 @@ async function serializeMessageWithEffectiveStats(doc) {
     clicks,
     lastActivityAt: toIsoString(lastEvent?.createdAt),
     device: lastEvent?.device || null,
-    location: lastEvent?.location || null
+    location: lastEvent?.location || null,
+    events: countableEvents.slice(-20).reverse().map(serializeEvent)
+  };
+}
+
+function serializeEvent(event) {
+  return {
+    type: event.type,
+    createdAt: toIsoString(event.createdAt),
+    device: event.device || null,
+    location: event.location || null,
+    label: event.label || null,
+    kind: event.kind || null,
+    url: event.url || null
   };
 }
 
@@ -263,6 +281,11 @@ function getStatusFromCounts(opens, clicks) {
   if (clicks > 0) return "clicked";
   if (opens > 0) return "opened";
   return "sent";
+}
+
+function normalizeEventKind(value) {
+  const kind = cleanString(value, 20).toLowerCase();
+  return ["link", "pdf", "document"].includes(kind) ? kind : "link";
 }
 
 function applyCors(req, res) {
@@ -312,6 +335,7 @@ function serializeMessage(id, data) {
     lastActivityAt: toIsoString(data.lastActivityAt),
     device: data.device || null,
     location: data.location || null,
+    events: [],
     muted: Boolean(data.muted)
   };
 }

@@ -24,6 +24,11 @@
   };
   const BADGE_VERSION = "4";
   const ROW_TIME_MATCH_WINDOW_MS = 75 * 1000;
+  const ACTIVE_STATE_REFRESH_MS = 2500;
+  const BACKGROUND_STATE_REFRESH_MS = 30000;
+  const HOVER_STATE_REFRESH_MS = 1500;
+  const DOCUMENT_EXTENSION_PATTERN = /\.(pdf|docx?|xlsx?|pptx?|csv|rtf|txt|pages|numbers|key)(?:$|[?#])/i;
+  const DOCUMENT_LABEL_PATTERN = /\.(pdf|docx?|xlsx?|pptx?|csv|rtf|txt|pages|numbers|key)\b/i;
 
   let cachedMessages = [];
   let cachedSettings = {};
@@ -32,6 +37,9 @@
   let activeHoverAnchor = null;
   let hoverCloseTimer = null;
   let rowMatchRetryTimer = null;
+  let stateRefreshTimer = null;
+  let stateRefreshInFlight = null;
+  let lastHoverStateRefreshAt = 0;
   let lastLocation = location.href;
 
   init();
@@ -61,6 +69,9 @@
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") hideHoverCard();
     }, true);
+    document.addEventListener("visibilitychange", () => {
+      scheduleStateRefresh(document.hidden ? BACKGROUND_STATE_REFRESH_MS : 250);
+    });
 
     if (globalThis.chrome?.storage?.onChanged) {
       chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -71,13 +82,7 @@
       });
     }
 
-    setInterval(() => {
-      if (lastLocation !== location.href) {
-        lastLocation = location.href;
-        hideHoverCard();
-      }
-      refreshState().then(queueDecorate);
-    }, 30000);
+    scheduleStateRefresh(ACTIVE_STATE_REFRESH_MS);
   }
 
   async function refreshState() {
@@ -85,6 +90,47 @@
     if (!response?.ok) return;
     cachedMessages = response.messages || [];
     cachedSettings = response.settings || {};
+  }
+
+  function scheduleStateRefresh(delay = getStateRefreshDelay()) {
+    if (stateRefreshTimer) {
+      window.clearTimeout(stateRefreshTimer);
+      stateRefreshTimer = null;
+    }
+
+    stateRefreshTimer = window.setTimeout(async () => {
+      stateRefreshTimer = null;
+      await refreshStateAndDecorate();
+      scheduleStateRefresh();
+    }, delay);
+  }
+
+  async function refreshStateAndDecorate() {
+    if (lastLocation !== location.href) {
+      lastLocation = location.href;
+      hideHoverCard();
+    }
+
+    if (document.hidden) return;
+    await refreshStateOnce();
+    queueDecorate();
+    refreshActiveHoverCard();
+  }
+
+  function refreshStateOnce() {
+    if (!stateRefreshInFlight) {
+      stateRefreshInFlight = refreshState().finally(() => {
+        stateRefreshInFlight = null;
+      });
+    }
+
+    return stateRefreshInFlight;
+  }
+
+  function getStateRefreshDelay() {
+    if (document.hidden) return BACKGROUND_STATE_REFRESH_MS;
+    if (isSentFolderView()) return ACTIVE_STATE_REFRESH_MS;
+    return BACKGROUND_STATE_REFRESH_MS;
   }
 
   function queueDecorate() {
@@ -596,6 +642,7 @@
     clearHoverCloseTimer();
 
     if (activeHoverCard && activeHoverAnchor === anchor) {
+      activeHoverCard.replaceChildren(createHoverCardContent(message, state));
       positionHoverCard(anchor, activeHoverCard);
       return;
     }
@@ -633,6 +680,26 @@
     const message = cachedMessages.find((trackedMessage) => trackedMessage.id === badge.dataset.simpleTrackMessageId);
     if (!message) return;
     showHoverCard(badge, message, getMessageState(message));
+    refreshHoverStateForBadge(badge);
+  }
+
+  async function refreshHoverStateForBadge(badge) {
+    const now = Date.now();
+    if (now - lastHoverStateRefreshAt < HOVER_STATE_REFRESH_MS) return;
+    lastHoverStateRefreshAt = now;
+
+    await refreshStateOnce();
+    queueDecorate();
+
+    if (activeHoverAnchor !== badge || !activeHoverCard || !badge.isConnected) return;
+    refreshActiveHoverCard();
+  }
+
+  function refreshActiveHoverCard() {
+    if (!activeHoverCard || !activeHoverAnchor) return;
+    const message = cachedMessages.find((trackedMessage) => trackedMessage.id === activeHoverAnchor.dataset.simpleTrackMessageId);
+    if (!message) return;
+    showHoverCard(activeHoverAnchor, message, getMessageState(message));
   }
 
   function hideHoverCard() {
@@ -913,9 +980,73 @@
       if (!/^https?:\/\//i.test(href)) continue;
       if (href.startsWith(clickPrefix)) continue;
 
+      const label = getLinkLabel(link, href);
+      const kind = getLinkKind(href, label);
       link.dataset.simpleTrackOriginalHref = href;
       link.dataset.simpleTrackWrapped = "true";
-      link.href = `${clickPrefix}${encodeURIComponent(href)}`;
+      link.href = getTrackedClickUrl(clickPrefix, href, label, kind);
+    }
+  }
+
+  function getTrackedClickUrl(clickPrefix, href, label, kind) {
+    const url = `${clickPrefix}${encodeURIComponent(href)}`;
+    const params = new URLSearchParams();
+    if (label) params.set("l", label);
+    if (kind) params.set("k", kind);
+    const query = params.toString();
+    return query ? `${url}&${query}` : url;
+  }
+
+  function getLinkLabel(link, href) {
+    const explicitLabel = normalizeWhitespace(
+      link.textContent ||
+      link.getAttribute("aria-label") ||
+      link.getAttribute("title") ||
+      link.getAttribute("download")
+    );
+
+    if (explicitLabel) return explicitLabel.slice(0, 160);
+
+    const filename = getLinkFileName(href);
+    if (filename) return filename.slice(0, 160);
+
+    try {
+      return new URL(href).hostname.slice(0, 160);
+    } catch {
+      return "tracked link";
+    }
+  }
+
+  function getLinkKind(href, label) {
+    if (isPdfLink(href) || /\.pdf\b/i.test(label)) return "pdf";
+    if (isDocumentLink(href) || DOCUMENT_LABEL_PATTERN.test(label)) return "document";
+    return "link";
+  }
+
+  function isPdfLink(href) {
+    try {
+      return /\.pdf$/i.test(new URL(href).pathname);
+    } catch {
+      return /\.pdf(?:$|[?#])/i.test(href);
+    }
+  }
+
+  function isDocumentLink(href) {
+    try {
+      const url = new URL(href);
+      return DOCUMENT_EXTENSION_PATTERN.test(url.pathname) || DOCUMENT_EXTENSION_PATTERN.test(href);
+    } catch {
+      return DOCUMENT_EXTENSION_PATTERN.test(href);
+    }
+  }
+
+  function getLinkFileName(href) {
+    try {
+      const pathname = new URL(href).pathname;
+      const filename = pathname.split("/").filter(Boolean).pop();
+      return filename ? decodeURIComponent(filename) : "";
+    } catch {
+      return "";
     }
   }
 
@@ -944,6 +1075,12 @@
   function normalizeText(value) {
     return String(value || "")
       .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function normalizeWhitespace(value) {
+    return String(value || "")
       .replace(/\s+/g, " ")
       .trim();
   }

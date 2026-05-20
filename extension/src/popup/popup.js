@@ -9,6 +9,24 @@ const fallbackState = {
       clicks: 0,
       lastActivityAt: "2026-05-18T18:44:14.000Z",
       sentAt: "2026-05-18T17:09:25.000Z",
+      events: [
+        {
+          type: "open",
+          createdAt: "2026-05-18T18:44:14.000Z",
+          device: "Chrome on Windows",
+          location: "Saskatoon, SK",
+          url: null
+        },
+        {
+          type: "click",
+          createdAt: "2026-05-18T18:46:08.000Z",
+          device: "Chrome on Windows",
+          location: "Saskatoon, SK",
+          label: "Lawncare quote PDF",
+          kind: "pdf",
+          url: "https://example.com/lawncare"
+        }
+      ],
       muted: false
     }
   ],
@@ -19,6 +37,9 @@ const fallbackState = {
 let currentState = fallbackState;
 let currentFilter = "all";
 let currentSearch = "";
+let popupRefreshTimer = null;
+
+const POPUP_REFRESH_MS = 2500;
 
 const elements = {
   openRate: document.querySelector("#openRate"),
@@ -66,6 +87,18 @@ async function init() {
       renderMessages();
     });
   }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      stopPopupRefresh();
+      return;
+    }
+
+    refreshPopupState();
+    startPopupRefresh();
+  });
+
+  startPopupRefresh();
 }
 
 async function getState() {
@@ -85,6 +118,25 @@ async function sendMessage(message) {
     console.warn("Simple Track popup fell back to preview data", error);
     return fallbackState;
   }
+}
+
+function startPopupRefresh() {
+  stopPopupRefresh();
+  popupRefreshTimer = window.setInterval(refreshPopupState, POPUP_REFRESH_MS);
+}
+
+function stopPopupRefresh() {
+  if (!popupRefreshTimer) return;
+  window.clearInterval(popupRefreshTimer);
+  popupRefreshTimer = null;
+}
+
+async function refreshPopupState() {
+  if (document.hidden) return;
+  const nextState = await getState();
+  if (!nextState?.ok) return;
+  currentState = nextState;
+  render();
 }
 
 function render() {
@@ -140,10 +192,18 @@ function renderMessages() {
     node.querySelector(".last-activity").textContent = formatDetailedDate(message.lastActivityAt) || "Not opened yet";
     node.querySelector(".device").textContent = message.device || "Pending";
     node.querySelector(".location").textContent = message.location || "Unknown";
+    renderEventTimeline(node, message);
 
     const muteButton = node.querySelector(".mute-button");
     muteButton.textContent = message.muted ? "Muted" : "Mute";
     muteButton.addEventListener("click", () => toggleMuted(message.id, !message.muted));
+
+    const deleteButton = node.querySelector(".delete-button");
+    deleteButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      deleteMessage(message.id);
+    });
 
     elements.activityList.append(node);
   }
@@ -156,6 +216,12 @@ async function toggleMuted(id, muted) {
   });
   renderMessages();
   await sendMessage({ type: "simpleTrack:setMuted", id, muted });
+}
+
+async function deleteMessage(id) {
+  currentState.messages = currentState.messages.filter((message) => message.id !== id);
+  render();
+  await sendMessage({ type: "simpleTrack:deleteMessage", id });
 }
 
 function matchesFilter(message) {
@@ -172,9 +238,12 @@ function matchesSearch(message) {
 }
 
 function getStatus(message) {
-  if (message.clicks > 0) return { key: "clicked", label: `${message.clicks} click${message.clicks === 1 ? "" : "s"}`, shortLabel: "Clicked" };
-  if (message.opens > 0) return { key: "opened", label: `${message.opens} open${message.opens === 1 ? "" : "s"}`, shortLabel: "Opened" };
-  return { key: "sent", label: "Sent, not read", shortLabel: "Unread" };
+  const openLabel = `${message.opens} open${message.opens === 1 ? "" : "s"}`;
+  const clickLabel = `${message.clicks} click${message.clicks === 1 ? "" : "s"}`;
+
+  if (message.clicks > 0) return { key: "clicked", label: `${openLabel} / ${clickLabel}`, shortLabel: "Clicked" };
+  if (message.opens > 0) return { key: "opened", label: `${openLabel} / ${clickLabel}`, shortLabel: "Opened" };
+  return { key: "sent", label: `${openLabel} / ${clickLabel}`, shortLabel: "Unread" };
 }
 
 function getRecipientLabel(message) {
@@ -194,14 +263,107 @@ function renderActivity(container, message, status) {
 
 function getActivityPhrase(message, status) {
   if (status.key === "clicked") {
-    return `had a link clicked ${formatRelativeDate(message.lastActivityAt)}`;
+    return `had a link clicked ${formatRelativeDate(message.lastActivityAt)} at ${formatTime(message.lastActivityAt)}`;
   }
 
   if (status.key === "opened") {
-    return `was last opened ${formatRelativeDate(message.lastActivityAt)}`;
+    return `was last opened ${formatRelativeDate(message.lastActivityAt)} at ${formatTime(message.lastActivityAt)}`;
   }
 
   return "has not been opened yet";
+}
+
+function renderEventTimeline(node, message) {
+  const timeline = node.querySelector(".event-timeline");
+  const eventCount = node.querySelector(".event-count");
+  const events = Array.isArray(message.events) ? message.events : [];
+
+  timeline.replaceChildren();
+  eventCount.textContent = events.length ? `${events.length} recent` : "No events";
+
+  if (events.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "event-row is-empty";
+    empty.textContent = message.clicks > 0
+      ? "Older click events were counted before URL details were stored."
+      : "No opens or clicks recorded yet.";
+    timeline.append(empty);
+    return;
+  }
+
+  for (const event of events.slice(0, 12)) {
+    const item = document.createElement("li");
+    item.className = `event-row ${event.type === "click" ? "is-click" : "is-open"}`;
+
+    const icon = document.createElement("span");
+    icon.className = "event-icon";
+    icon.textContent = event.type === "click" ? "C" : "O";
+
+    const copy = document.createElement("span");
+    copy.className = "event-copy";
+
+    const title = document.createElement("strong");
+    title.textContent = getEventTitle(event);
+
+    const meta = document.createElement("em");
+    meta.textContent = [formatDetailedDate(event.createdAt), event.device, event.location]
+      .filter(Boolean)
+      .join(" - ");
+
+    copy.append(title, meta);
+    item.append(icon, copy);
+    timeline.append(item);
+  }
+}
+
+function getEventTitle(event) {
+  if (event.type === "click") {
+    if (event.kind === "pdf") {
+      return `Opened PDF: ${getEventTarget(event)}`;
+    }
+
+    if (event.kind === "document") {
+      return `Opened document: ${getEventTarget(event)}`;
+    }
+
+    return `Clicked ${getEventTarget(event)}`;
+  }
+
+  return "Opened email";
+}
+
+function getEventTarget(event) {
+  const label = cleanEventLabel(event.label);
+  const url = formatClickedUrl(event.url);
+
+  if (label && url && !labelsMatch(label, url)) {
+    return `${label} - ${url}`;
+  }
+
+  return label || url || "tracked link";
+}
+
+function cleanEventLabel(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function labelsMatch(label, url) {
+  const normalizedLabel = label.toLowerCase();
+  const normalizedUrl = url.toLowerCase();
+  return normalizedLabel === normalizedUrl || normalizedUrl.includes(normalizedLabel);
+}
+
+function formatClickedUrl(value) {
+  if (!value) return "tracked link";
+
+  try {
+    const url = new URL(value);
+    return `${url.hostname}${url.pathname}`.replace(/\/$/, "");
+  } catch {
+    return value;
+  }
 }
 
 function formatRelativeDate(value) {
@@ -232,6 +394,14 @@ function formatShortDate(value) {
   return new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(new Date(value));
+}
+
+function formatTime(value) {
+  if (!value) return "";
+  return new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
     minute: "2-digit"
   }).format(new Date(value));
