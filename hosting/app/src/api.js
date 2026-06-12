@@ -46,6 +46,10 @@ export function createPairingCode(getToken) {
   return request("/app/pairing-codes", { method: "POST", getToken });
 }
 
+export function connectExtension(getToken, connection) {
+  return request("/app/connect-extension", { method: "POST", getToken, body: connection });
+}
+
 export function exportUrl(type) {
   return `${API_BASE}/app/export?type=${encodeURIComponent(type)}`;
 }

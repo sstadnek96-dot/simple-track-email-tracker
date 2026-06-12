@@ -28,7 +28,7 @@ import {
 import { auth, googleProvider, microsoftProvider } from "./firebase";
 import {
   createContact,
-  createPairingCode,
+  connectExtension,
   createPdfFile,
   fetchBootstrap,
   fetchDashboard,
@@ -88,12 +88,14 @@ function App() {
   const [bootstrap, setBootstrap] = useState(null);
   const [data, setData] = useState(null);
   const [activePage, setActivePage] = useState("activity");
+  const [activeMailAccount, setActiveMailAccount] = useState("all");
   const [query, setQuery] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const allowHarness = harnessAllowed();
+  const isConnectPage = window.location.pathname === "/connect-extension";
 
   useEffect(() => {
     return onAuthStateChanged(auth, (authUser) => {
@@ -121,10 +123,13 @@ function App() {
       ]);
       setBootstrap(boot);
       setData(dashboard.data);
+      const firstAccount = dashboard.data?.connectedAccounts?.[0]?.email || boot.connectedAccounts?.[0]?.email || "all";
+      setActiveMailAccount(firstAccount);
     } catch (loadError) {
       if (allowHarness) {
         setBootstrap(mockBootstrap);
         setData(mockDashboard);
+        setActiveMailAccount(mockDashboard.connectedAccounts?.[0]?.email || "all");
       } else {
         setError(loadError.message);
       }
@@ -159,11 +164,28 @@ function App() {
     if (auth.currentUser) await signOut(auth);
   }
 
+  if (isConnectPage) {
+    return (
+      <ConnectExtensionPage
+        user={user}
+        authReady={authReady}
+        allowHarness={allowHarness}
+        error={error}
+        setError={setError}
+        login={login}
+        loginHarness={loginHarness}
+        getToken={getToken}
+        logout={logout}
+      />
+    );
+  }
+
   const page = NAV.find((item) => item.id === activePage) || NAV[0];
   const pageContent = data ? (
     <PageRouter
       activePage={activePage}
       query={query}
+      activeMailAccount={activeMailAccount}
       data={data}
       setData={setData}
       getToken={getToken}
@@ -212,6 +234,15 @@ function App() {
                 <div className="profile-menu">
                   <strong>{user?.displayName}</strong>
                   <small>{user?.email}</small>
+                  <ProfileAccountSwitcher
+                    accounts={data?.connectedAccounts || bootstrap?.connectedAccounts || []}
+                    activeMailAccount={activeMailAccount}
+                    setActiveMailAccount={setActiveMailAccount}
+                  />
+                  <button type="button" onClick={() => login("google")}>
+                    <Users size={15} />
+                    Change account
+                  </button>
                   <button type="button" onClick={logout}>
                     <LogOut size={15} />
                     Sign out
@@ -338,6 +369,46 @@ function LoginModal({ error, allowHarness, login, loginHarness }) {
   );
 }
 
+function ProfileAccountSwitcher({ accounts = [], activeMailAccount, setActiveMailAccount }) {
+  const normalizedAccounts = useMemo(() => {
+    const byEmail = new Map();
+    for (const account of accounts) {
+      const email = String(account?.email || "").toLowerCase();
+      if (!email) continue;
+      byEmail.set(email, {
+        email,
+        displayName: account.displayName || account.name || email,
+        client: account.client || "Gmail",
+        status: account.status || "connected"
+      });
+    }
+    return [...byEmail.values()].sort((a, b) => a.email.localeCompare(b.email));
+  }, [accounts]);
+
+  if (normalizedAccounts.length === 0) {
+    return (
+      <div className="account-switcher empty">
+        <Mail size={15} />
+        <span>No connected mail accounts yet</span>
+      </div>
+    );
+  }
+
+  return (
+    <label className="account-switcher">
+      <span>Tracking account</span>
+      <select value={activeMailAccount || "all"} onChange={(event) => setActiveMailAccount(event.target.value)}>
+        <option value="all">All connected accounts</option>
+        {normalizedAccounts.map((account) => (
+          <option key={account.email} value={account.email}>
+            {account.email}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function GoogleLogo() {
   return (
     <svg className="brand-login-logo" viewBox="0 0 24 24" aria-hidden="true">
@@ -360,20 +431,187 @@ function MicrosoftLogo() {
   );
 }
 
-function PageRouter({ activePage, query, data, setData, getToken, bootstrap }) {
+function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, login, loginHarness, getToken, logout }) {
+  const [params] = useState(() => readConnectionParams());
+  const [status, setStatus] = useState("idle");
+  const [message, setMessage] = useState("");
+  const [connectedAccount, setConnectedAccount] = useState(null);
+  const requestedEmail = params.accountEmail || "";
+
+  async function continueWithGoogle() {
+    setStatus("signing-in");
+    setError("");
+    setMessage("");
+    try {
+      if (!user) {
+        await login("google");
+      } else {
+        await connectSignedInUser();
+      }
+    } catch (connectError) {
+      setStatus("failed");
+      setMessage(connectError.message);
+    }
+  }
+
+  useEffect(() => {
+    if (!user || status !== "signing-in") return;
+    connectSignedInUser();
+  }, [user, status]);
+
+  async function connectSignedInUser() {
+    if (!params.installId || !params.installSecret || !requestedEmail) {
+      setStatus("failed");
+      setMessage("The extension connection link is missing required details. Return to Gmail and click Enable again.");
+      return;
+    }
+
+    setStatus("connecting");
+    try {
+      const response = await connectExtension(getToken, {
+        installId: params.installId,
+        installSecret: params.installSecret,
+        accountEmail: requestedEmail,
+        client: params.client || "Gmail",
+        provider: "google",
+        accountDisplayName: user?.displayName || requestedEmail
+      });
+      setConnectedAccount(response.account);
+      setStatus("connected");
+      setMessage(`${requestedEmail} is connected. You can return to Gmail.`);
+    } catch (connectError) {
+      setStatus("failed");
+      setMessage(connectError.message);
+    }
+  }
+
+  async function chooseAnotherAccount() {
+    if (user) await logout();
+    setStatus("idle");
+    setMessage("");
+    await login("google");
+    setStatus("signing-in");
+  }
+
+  function useHarnessAccount() {
+    loginHarness();
+    setStatus("signing-in");
+  }
+
+  const isBusy = status === "signing-in" || status === "connecting";
+  const isConnected = status === "connected";
+  const isFailed = status === "failed";
+
+  return (
+    <main className="connect-page">
+      <section className="connect-panel">
+        <div className="connect-brand-row">
+          <div className="logo-mark">ST</div>
+          <span />
+          <GoogleLogo />
+        </div>
+        <h1>{isConnected ? "Gmail connected" : isFailed ? "Connection needs attention" : "Connect Gmail"}</h1>
+        <p className="connect-lede">
+          {isConnected
+            ? `${connectedAccount?.email || requestedEmail} can now use Simple Track from Gmail without access keys.`
+            : `Connect ${requestedEmail || "this Gmail account"} to Simple Track so the extension can track only the right account.`}
+        </p>
+
+        <div className="permissions-card">
+          <PermissionItem icon={ShieldCheck} title="Permissions we need" text="Simple Track links this browser install to the Google account you choose." />
+          <PermissionItem icon={Eye} title="No mailbox harvesting" text="The web app receives tracking metadata, not your full inbox or password." />
+          <PermissionItem icon={Check} title="You are in control" text="Disconnect or change accounts from the app profile menu or extension settings." />
+        </div>
+
+        {user ? (
+          <div className="signed-in-strip">
+            <UserRound size={18} />
+            <span>Signed in as <strong>{user.email}</strong></span>
+          </div>
+        ) : null}
+
+        {message || error ? (
+          <div className={isConnected ? "success-banner" : "error-banner compact"}>
+            {message || error}
+          </div>
+        ) : null}
+
+        <div className="connect-actions">
+          {!isConnected ? (
+            <button type="button" onClick={continueWithGoogle} disabled={!authReady || isBusy}>
+              {isBusy ? <Loader2 className="spin" size={18} /> : <GoogleLogo />}
+              {user ? "Connect this Gmail" : "Continue to Google"}
+            </button>
+          ) : (
+            <a className="connect-done-button" href="https://mail.google.com/">Return to Gmail</a>
+          )}
+          {user && !isConnected ? (
+            <button className="ghost-button" type="button" onClick={chooseAnotherAccount}>
+              Choose another Google account
+            </button>
+          ) : null}
+          {allowHarness && !user && !isConnected ? (
+            <button className="ghost-button" type="button" onClick={useHarnessAccount}>
+              <Gauge size={17} />
+              Use harness account
+            </button>
+          ) : null}
+        </div>
+
+        <p className="connect-footnote">
+          By connecting, you agree to use Simple Track only for accounts you own or are authorized to track.
+        </p>
+      </section>
+    </main>
+  );
+}
+
+function PermissionItem({ icon: Icon, title, text }) {
+  return (
+    <article className="permission-item">
+      <Icon size={20} />
+      <div>
+        <strong>{title}</strong>
+        <p>{text}</p>
+      </div>
+    </article>
+  );
+}
+
+function readConnectionParams() {
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const search = new URLSearchParams(window.location.search);
+  const get = (key) => hash.get(key) || search.get(key) || "";
+  return {
+    installId: get("installId"),
+    installSecret: get("installSecret"),
+    accountEmail: get("accountEmail").toLowerCase(),
+    client: get("client") || "Gmail",
+    source: get("source")
+  };
+}
+
+function PageRouter({ activePage, query, activeMailAccount, data, setData, getToken, bootstrap }) {
+  const scopedMessages = useMemo(() => filterByAccount(data.messages || [], activeMailAccount), [data.messages, activeMailAccount]);
+  const scopedMessageIds = useMemo(() => new Set(scopedMessages.map((message) => message.id)), [scopedMessages]);
+  const scopedActivity = useMemo(() => filterEventsByAccount(data.activity || [], activeMailAccount, scopedMessageIds), [data.activity, activeMailAccount, scopedMessageIds]);
+  const scopedLinks = useMemo(() => filterEventsByAccount(data.links || [], activeMailAccount, scopedMessageIds), [data.links, activeMailAccount, scopedMessageIds]);
+  const scopedContacts = useMemo(() => filterContactsByMessages(data.contacts || [], scopedMessages, activeMailAccount), [data.contacts, scopedMessages, activeMailAccount]);
+  const scopedPerformance = useMemo(() => buildClientPerformance(scopedMessages, data.files || []), [scopedMessages, data.files]);
+
   const filtered = useMemo(() => ({
-    messages: filterRows(data.messages || [], query, ["subject", "recipients"]),
-    activity: filterRows(data.activity || [], query, ["subject", "recipient", "label"]),
-    links: filterRows(data.links || [], query, ["subject", "recipient", "label", "url"]),
-    contacts: filterRows(data.contacts || [], query, ["name", "email", "domain"]),
+    messages: filterRows(scopedMessages, query, ["subject", "recipients", "accountEmail"]),
+    activity: filterRows(scopedActivity, query, ["subject", "recipient", "label", "accountEmail"]),
+    links: filterRows(scopedLinks, query, ["subject", "recipient", "label", "url", "accountEmail"]),
+    contacts: filterRows(scopedContacts, query, ["name", "email", "domain"]),
     files: filterRows(data.files || [], query, ["name", "trackingUrl"])
-  }), [data, query]);
+  }), [data.files, query, scopedActivity, scopedContacts, scopedLinks, scopedMessages]);
 
   if (activePage === "activity") return <LatestActivity activity={filtered.activity} />;
   if (activePage === "email") return <EmailTracking messages={filtered.messages} />;
   if (activePage === "links") return <LinkClicks links={filtered.links} />;
   if (activePage === "pdf") return <PdfAnalytics files={filtered.files} data={data} setData={setData} getToken={getToken} />;
-  if (activePage === "performance") return <Performance performance={data.performance} />;
+  if (activePage === "performance") return <Performance performance={activeMailAccount === "all" ? data.performance : scopedPerformance} />;
   if (activePage === "crm") return <CRM contacts={filtered.contacts} data={data} setData={setData} getToken={getToken} />;
   return <SettingsPage data={data} setData={setData} getToken={getToken} bootstrap={bootstrap} />;
 }
@@ -639,8 +877,8 @@ function CRM({ contacts, data, setData, getToken }) {
 function SettingsPage({ data, setData, getToken, bootstrap }) {
   const [tab, setTab] = useState("settings");
   const [settings, setSettings] = useState(data.settings || {});
-  const [pairing, setPairing] = useState("");
   const [status, setStatus] = useState("");
+  const connectedAccounts = data.connectedAccounts || bootstrap?.connectedAccounts || [];
 
   async function saveSettings(next) {
     setSettings(next);
@@ -649,17 +887,6 @@ function SettingsPage({ data, setData, getToken, bootstrap }) {
     try {
       await updateSettings(getToken, next);
       setStatus("Saved");
-    } catch (error) {
-      setStatus(error.message);
-    }
-  }
-
-  async function makePairingCode() {
-    setStatus("Generating pairing code...");
-    try {
-      const response = await createPairingCode(getToken);
-      setPairing(response.code);
-      setStatus("Paste this code into the extension settings page within 15 minutes.");
     } catch (error) {
       setStatus(error.message);
     }
@@ -692,11 +919,18 @@ function SettingsPage({ data, setData, getToken, bootstrap }) {
             />
             <div className="pairing-panel">
               <div>
-                <h3>Pair Chrome extension</h3>
-                <p>Generate a short code, then paste it into the extension settings page to attach that install to this workspace.</p>
-                {pairing ? <code>{pairing}</code> : null}
+                <h3>Chrome extension connection</h3>
+                <p>Open Gmail, click Enable in the Simple Track prompt, then sign in here. No install keys or pasted codes are required.</p>
+                <div className="connected-account-list">
+                  {connectedAccounts.length ? connectedAccounts.map((account) => (
+                    <span key={account.email}>
+                      <Check size={14} />
+                      {account.email}
+                    </span>
+                  )) : <em>No Gmail accounts connected yet</em>}
+                </div>
               </div>
-              <button type="button" onClick={makePairingCode}>Generate code</button>
+              <a className="settings-link-button" href="https://mail.google.com/" target="_blank" rel="noreferrer">Open Gmail</a>
             </div>
           </div>
         ) : null}
@@ -956,6 +1190,97 @@ function filterRows(rows, query, fields) {
     const text = Array.isArray(entry) ? entry.join(" ") : String(entry || "");
     return text.toLowerCase().includes(value);
   }));
+}
+
+function filterByAccount(rows, activeMailAccount) {
+  const account = normalizeAccountEmail(activeMailAccount);
+  if (!account || account === "all") return rows;
+  return rows.filter((row) => normalizeAccountEmail(row.accountEmail) === account);
+}
+
+function filterEventsByAccount(rows, activeMailAccount, scopedMessageIds) {
+  const account = normalizeAccountEmail(activeMailAccount);
+  if (!account || account === "all") return rows;
+  return rows.filter((row) => {
+    const rowAccount = normalizeAccountEmail(row.accountEmail);
+    if (rowAccount) return rowAccount === account;
+    return row.messageId ? scopedMessageIds.has(row.messageId) : false;
+  });
+}
+
+function filterContactsByMessages(contacts, messages, activeMailAccount) {
+  const account = normalizeAccountEmail(activeMailAccount);
+  if (!account || account === "all") return contacts;
+  const recipientEmails = new Set(
+    messages
+      .flatMap((message) => message.recipients || [])
+      .map((recipient) => normalizeAccountEmail(extractEmail(recipient)))
+      .filter(Boolean)
+  );
+  return contacts.filter((contact) => recipientEmails.has(normalizeAccountEmail(contact.email)));
+}
+
+function buildClientPerformance(messages, files = []) {
+  const sent = messages.length;
+  const opened = messages.filter((message) => Number(message.opens || 0) > 0).length;
+  const clicked = messages.filter((message) => Number(message.clicks || 0) > 0).length;
+  const pdfViewed = files.filter((file) => Number(file.views || 0) > 0).length;
+  const totalOpens = messages.reduce((sum, message) => sum + Number(message.opens || 0), 0);
+  const totalClicks = messages.reduce((sum, message) => sum + Number(message.clicks || 0), 0);
+
+  return {
+    totals: {
+      sent,
+      opened,
+      clicked,
+      pdfViewed,
+      totalOpens,
+      totalClicks,
+      openRate: sent ? Math.round((opened / sent) * 100) : 0,
+      clickRate: sent ? Math.round((clicked / sent) * 100) : 0,
+      pdfRate: files.length ? Math.round((pdfViewed / files.length) * 100) : 0
+    },
+    heatmap: buildClientHeatmap(messages),
+    sentByDay: groupClientMessagesByDay(messages, "sentAt"),
+    openedByDay: groupClientMessagesByDay(messages, "lastActivityAt")
+  };
+}
+
+function buildClientHeatmap(messages) {
+  const grid = Array.from({ length: 7 }, (_, day) => (
+    Array.from({ length: 24 }, (_, hour) => ({ day, hour, count: 0 }))
+  ));
+
+  for (const message of messages) {
+    const date = new Date(message.sentAt || 0);
+    if (!Number.isFinite(date.getTime())) continue;
+    grid[date.getDay()][date.getHours()].count += 1;
+  }
+
+  return grid.flat();
+}
+
+function groupClientMessagesByDay(messages, field) {
+  const counts = new Map();
+  for (const message of messages) {
+    const date = new Date(message[field] || 0);
+    if (!Number.isFinite(date.getTime())) continue;
+    const key = date.toISOString().slice(0, 10);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, count]) => ({ date, count }));
+}
+
+function extractEmail(value) {
+  const match = String(value || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match ? match[0] : value;
+}
+
+function normalizeAccountEmail(value) {
+  return String(value || "").trim().toLowerCase();
 }
 
 function summaryText(opens, clicks, files) {

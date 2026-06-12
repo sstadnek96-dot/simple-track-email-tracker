@@ -24,6 +24,7 @@ const INSTALLS = "installs";
 const PAIRING_CODES = "pairingCodes";
 const PDF_FILES = "pdfFiles";
 const RATE_LIMITS = "rateLimits";
+const MAIL_ACCOUNTS = "mailAccounts";
 const OPEN_GRACE_PERIOD_MS = Number(process.env.SIMPLE_TRACK_OPEN_GRACE_PERIOD_MS || 0);
 const INTERACTION_GRACE_PERIOD_MS = Number(process.env.SIMPLE_TRACK_INTERACTION_GRACE_PERIOD_MS || 0);
 const TRANSPARENT_GIF = Buffer.from(
@@ -41,6 +42,11 @@ exports.api = onRequest({ secrets: [simpleTrackIpHashSalt], timeoutSeconds: 3600
 
   try {
     const route = normalizeRoute(req.path);
+
+    if (req.method === "GET" && route === "/install/status") {
+      await getExtensionInstallStatus(req, res);
+      return;
+    }
 
     if (route === "/app" || route.startsWith("/app/")) {
       await handleAppRequest(req, res, route);
@@ -126,6 +132,8 @@ exports.file = onRequest({ secrets: [simpleTrackIpHashSalt] }, async (req, res) 
 async function createTrackedMessage(req, res) {
   const body = await readJson(req);
   const installId = cleanString(body.installId, 120);
+  const installSecret = getInstallSecretFromRequest(req, body);
+  const accountEmail = normalizeEmail(body.accountEmail);
   const subject = cleanString(body.subject, 300) || "Tracked email";
   const recipients = Array.isArray(body.recipients)
     ? body.recipients.map((recipient) => cleanString(recipient, 320)).filter(Boolean).slice(0, 25)
@@ -135,10 +143,23 @@ async function createTrackedMessage(req, res) {
   const trackingToken = randomToken();
   const docRef = db.collection(TRACKED_MESSAGES).doc();
   const linkedInstall = installId ? await getInstallForId(installId) : null;
+  const installAuthorized = isInstallSecretValid(linkedInstall, installSecret);
+  const connectedAccount = installAuthorized ? getConnectedAccount(linkedInstall, accountEmail) : null;
+
+  if (linkedInstall?.installSecretHash && !installAuthorized) {
+    res.status(401).json({ ok: false, error: "Install authentication failed" });
+    return;
+  }
+
+  if (accountEmail && hasConnectedAccounts(linkedInstall) && !connectedAccount) {
+    res.status(403).json({ ok: false, error: "This Gmail account is not connected to Simple Track yet" });
+    return;
+  }
 
   const message = {
     installId,
-    orgId: linkedInstall?.orgId || null,
+    orgId: connectedAccount?.orgId || linkedInstall?.orgId || null,
+    accountEmail,
     subject,
     recipients,
     client,
@@ -219,9 +240,16 @@ async function activateTrackedMessage(req, res) {
 
 async function listTrackedMessages(req, res) {
   const installId = cleanString(req.query.installId, 120);
+  const accountEmail = normalizeEmail(req.query.accountEmail);
 
   if (!installId) {
     res.status(400).json({ ok: false, error: "Missing installId" });
+    return;
+  }
+
+  const install = await getInstallForId(installId);
+  if (install?.installSecretHash && !isInstallSecretValid(install, getInstallSecretFromRequest(req))) {
+    res.status(401).json({ ok: false, error: "Install authentication failed" });
     return;
   }
 
@@ -232,6 +260,7 @@ async function listTrackedMessages(req, res) {
     .get();
 
   const messages = (await Promise.all(snapshot.docs.map((doc) => serializeMessageWithEffectiveStats(doc))))
+    .filter((message) => !accountEmail || message.accountEmail === accountEmail)
     .sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
 
   res.status(200).json({ ok: true, messages });
@@ -239,12 +268,27 @@ async function listTrackedMessages(req, res) {
 
 function streamTrackedEvents(req, res) {
   const installId = cleanString(req.query.installId, 120);
+  const accountEmail = normalizeEmail(req.query.accountEmail);
 
   if (!installId) {
     res.status(400).json({ ok: false, error: "Missing installId" });
     return;
   }
 
+  getInstallForId(installId).then((install) => {
+    if (install?.installSecretHash && !isInstallSecretValid(install, getInstallSecretFromRequest(req))) {
+      res.status(401).json({ ok: false, error: "Install authentication failed" });
+      return;
+    }
+
+    startTrackedEventStream(req, res, installId, accountEmail);
+  }).catch((error) => {
+    logger.warn("Simple Track event stream auth failed", { error: error.message });
+    res.status(500).json({ ok: false, error: "Event stream failed" });
+  });
+}
+
+function startTrackedEventStream(req, res, installId, accountEmail = "") {
   res.set("Content-Type", "text/event-stream");
   res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
   res.set("Connection", "keep-alive");
@@ -282,6 +326,7 @@ function streamTrackedEvents(req, res) {
         for (const change of snapshot.docChanges()) {
           if (closed) return;
           const message = await serializeMessageWithEffectiveStats(change.doc);
+          if (accountEmail && message.accountEmail !== accountEmail) continue;
           sendEvent("message", {
             ok: true,
             changeType: change.type,
@@ -313,13 +358,15 @@ async function handleAppRequest(req, res, route) {
   const context = await requireAppContext(req);
 
   if (req.method === "GET" && appRoute === "/bootstrap") {
+    const connectedAccounts = await getOrgMailAccounts(context.org.id);
     res.status(200).json({
       ok: true,
       user: context.user,
       org: context.org,
       membership: context.membership,
       plan: context.org.plan || getDefaultPlan(),
-      installCount: await countOrgInstalls(context.org.id)
+      installCount: await countOrgInstalls(context.org.id),
+      connectedAccounts
     });
     return;
   }
@@ -374,6 +421,12 @@ async function handleAppRequest(req, res, route) {
   if (req.method === "POST" && appRoute === "/files") {
     await enforceAppRateLimit(req, "files", 30, 60 * 60);
     await createPdfFile(context, req, res);
+    return;
+  }
+
+  if (req.method === "POST" && appRoute === "/connect-extension") {
+    await enforceAppRateLimit(req, "connect-extension", 30, 15 * 60);
+    await connectExtensionAccount(context, req, res);
     return;
   }
 
@@ -492,10 +545,146 @@ async function buildDashboardData(context) {
     links: buildLinkClickReport(messages),
     files,
     contacts,
+    connectedAccounts: await getOrgMailAccounts(context.org.id),
     performance: buildPerformanceReport(messages, files),
     settings: context.org.settings || getDefaultOrgSettings(),
     plan: context.org.plan || getDefaultPlan()
   };
+}
+
+async function getOrgMailAccounts(orgId) {
+  const snapshot = await db
+    .collection(ORGS)
+    .doc(orgId)
+    .collection(MAIL_ACCOUNTS)
+    .orderBy("updatedAt", "desc")
+    .limit(25)
+    .get();
+
+  return snapshot.docs.map((doc) => ({ id: doc.id, ...serializeTimestamps(doc.data()) }));
+}
+
+async function connectExtensionAccount(context, req, res) {
+  const body = await readJson(req);
+  const installId = cleanString(body.installId, 120);
+  const installSecret = cleanString(body.installSecret, 240);
+  const accountEmail = normalizeEmail(body.accountEmail);
+  const provider = cleanString(body.provider, 40) || "google";
+  const client = cleanString(body.client, 80) || "Gmail";
+  const accountDisplayName = cleanString(body.accountDisplayName, 160) || context.user.displayName || accountEmail;
+
+  if (!installId || !installSecret || !accountEmail) {
+    res.status(400).json({ ok: false, error: "Install ID, install secret, and account email are required" });
+    return;
+  }
+
+  if (normalizeEmail(context.user.email) !== accountEmail) {
+    res.status(409).json({
+      ok: false,
+      code: "account_mismatch",
+      error: `Sign in with ${accountEmail} to connect this Gmail account.`,
+      signedInEmail: context.user.email,
+      requestedEmail: accountEmail
+    });
+    return;
+  }
+
+  const now = Timestamp.now();
+  const account = {
+    email: accountEmail,
+    displayName: accountDisplayName,
+    provider,
+    client,
+    orgId: context.org.id,
+    userUid: context.uid,
+    installId,
+    connectedAt: now,
+    updatedAt: now,
+    status: "connected"
+  };
+  const installRef = db.collection(INSTALLS).doc(installId);
+  const accountRef = db.collection(ORGS).doc(context.org.id).collection(MAIL_ACCOUNTS).doc(accountEmail);
+  const installAccountRef = installRef.collection(MAIL_ACCOUNTS).doc(accountEmail);
+  const installSnapshot = await installRef.get();
+  const messagesSnapshot = await db
+    .collection(TRACKED_MESSAGES)
+    .where("installId", "==", installId)
+    .limit(450)
+    .get();
+  const batch = db.batch();
+
+  batch.set(installRef, {
+    installId,
+    installSecretHash: hashSecret(installSecret),
+    orgId: context.org.id,
+    ownerUid: context.uid,
+    activeAccountEmail: accountEmail,
+    accounts: {
+      [accountEmail]: {
+        email: accountEmail,
+        orgId: context.org.id,
+        userUid: context.uid,
+        provider,
+        client,
+        connectedAt: now,
+        updatedAt: now,
+        status: "connected"
+      }
+    },
+    updatedAt: now,
+    createdAt: installSnapshot.exists ? (installSnapshot.data().createdAt || now) : now
+  }, { merge: true });
+  batch.set(accountRef, account, { merge: true });
+  batch.set(installAccountRef, account, { merge: true });
+
+  for (const doc of messagesSnapshot.docs) {
+    const message = doc.data();
+    if (message.accountEmail && message.accountEmail !== accountEmail) continue;
+    batch.update(doc.ref, { orgId: context.org.id, accountEmail, updatedAt: now });
+  }
+
+  await batch.commit();
+  await writeAuditLog(context, "mail_account.connect", "mailAccount", accountEmail, {
+    installId,
+    linkedMessages: messagesSnapshot.size
+  });
+
+  res.status(200).json({
+    ok: true,
+    account: { id: accountEmail, ...serializeTimestamps(account) },
+    installId,
+    linkedMessages: messagesSnapshot.size
+  });
+}
+
+async function getExtensionInstallStatus(req, res) {
+  const installId = cleanString(req.query.installId, 120);
+  const accountEmail = normalizeEmail(req.query.accountEmail);
+
+  if (!installId) {
+    res.status(400).json({ ok: false, error: "Missing installId" });
+    return;
+  }
+
+  const install = await getInstallForId(installId);
+  if (!install?.installSecretHash || !isInstallSecretValid(install, getInstallSecretFromRequest(req))) {
+    res.status(401).json({ ok: false, error: "Install authentication failed" });
+    return;
+  }
+
+  const connectedAccounts = getInstallConnectedAccounts(install);
+  const selectedAccount = accountEmail
+    ? connectedAccounts.find((account) => account.email === accountEmail)
+    : null;
+
+  res.status(200).json({
+    ok: true,
+    installId,
+    activeAccountEmail: install.activeAccountEmail || connectedAccounts[0]?.email || "",
+    connectedAccounts,
+    accountStatus: getAccountConnectionStatus(install, accountEmail),
+    account: selectedAccount || null
+  });
 }
 
 async function getOrgMessages(orgId) {
@@ -530,6 +719,7 @@ function buildActivityTimeline(messages, files = []) {
         type: message.status === "clicked" ? "click" : "open",
         subject: message.subject,
         recipient: message.recipients?.[0] || "",
+        accountEmail: message.accountEmail || "",
         createdAt: message.lastActivityAt,
         source: "email",
         messageId: message.id
@@ -541,6 +731,7 @@ function buildActivityTimeline(messages, files = []) {
       type: event.type,
       subject: message.subject,
       recipient: message.recipients?.[0] || "",
+      accountEmail: message.accountEmail || "",
       label: event.label || null,
       url: event.url || null,
       device: event.device || message.device || null,
@@ -576,6 +767,7 @@ function buildLinkClickReport(messages) {
       .map((event, index) => ({
         id: `${message.id}:${index}:${event.createdAt}`,
         messageId: message.id,
+        accountEmail: message.accountEmail || "",
         subject: message.subject,
         recipient: message.recipients?.[0] || "",
         label: event.label || getUrlHost(event.url),
@@ -871,7 +1063,7 @@ async function pairInstallWithCode(req, res) {
   const messagesSnapshot = await db
     .collection(TRACKED_MESSAGES)
     .where("installId", "==", installId)
-    .limit(500)
+    .limit(450)
     .get();
   const batch = db.batch();
 
@@ -973,6 +1165,68 @@ async function enforceAppRateLimit(req, action, maxRequests, windowSeconds) {
       expiresAt: Timestamp.fromMillis(windowStart + (windowMs * 2))
     }, { merge: true });
   });
+}
+
+function getInstallConnectedAccounts(install) {
+  const accounts = install?.accounts && typeof install.accounts === "object" ? install.accounts : {};
+  return Object.values(accounts)
+    .filter((account) => account && account.email)
+    .map((account) => serializeTimestamps({
+      email: normalizeEmail(account.email),
+      displayName: cleanString(account.displayName, 160) || normalizeEmail(account.email),
+      provider: cleanString(account.provider, 40) || "google",
+      client: cleanString(account.client, 80) || "Gmail",
+      orgId: cleanString(account.orgId, 160),
+      status: cleanString(account.status, 40) || "connected",
+      connectedAt: account.connectedAt || null,
+      updatedAt: account.updatedAt || null
+    }))
+    .sort((a, b) => new Date(b.updatedAt || b.connectedAt || 0).getTime() - new Date(a.updatedAt || a.connectedAt || 0).getTime());
+}
+
+function getConnectedAccount(install, accountEmail) {
+  if (!install || !accountEmail) return null;
+  const accounts = install.accounts && typeof install.accounts === "object" ? install.accounts : {};
+  const account = accounts[accountEmail];
+  return account?.status === "connected" ? account : null;
+}
+
+function hasConnectedAccounts(install) {
+  return getInstallConnectedAccounts(install).length > 0;
+}
+
+function getAccountConnectionStatus(install, accountEmail) {
+  const connectedAccounts = getInstallConnectedAccounts(install);
+  if (!accountEmail) {
+    return {
+      status: connectedAccounts.length > 0 ? "connected_unknown_account" : "not_connected",
+      accountEmail: "",
+      connectedAccounts
+    };
+  }
+
+  const account = connectedAccounts.find((entry) => entry.email === accountEmail);
+  return {
+    status: account ? "connected" : "not_connected",
+    accountEmail,
+    connectedAccounts,
+    account: account || null
+  };
+}
+
+function isInstallSecretValid(install, installSecret) {
+  if (!install?.installSecretHash) return true;
+  return Boolean(installSecret && install.installSecretHash === hashSecret(installSecret));
+}
+
+function getInstallSecretFromRequest(req, body = null) {
+  return cleanString(
+    body?.installSecret ||
+    req.get("x-simple-track-install-secret") ||
+    req.query.s ||
+    req.query.installSecret,
+    240
+  );
 }
 
 async function getInstallForId(installId) {
@@ -1241,7 +1495,7 @@ function applyCors(req, res) {
   res.set("Access-Control-Allow-Origin", origin);
   res.set("Vary", "Origin");
   res.set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
-  res.set("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Simple-Track-Client");
+  res.set("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Simple-Track-Client,X-Simple-Track-Install-Secret");
   res.set("Access-Control-Max-Age", "3600");
 }
 
@@ -1364,6 +1618,7 @@ function serializeMessage(id, data) {
   return {
     id,
     orgId: data.orgId || null,
+    accountEmail: normalizeEmail(data.accountEmail),
     subject: data.subject || "Tracked email",
     recipients: Array.isArray(data.recipients) ? data.recipients : [],
     client: data.client || "Webmail",
@@ -1471,6 +1726,10 @@ function safeRedirectUrl(value) {
 
 function cleanString(value, maxLength) {
   return String(value || "").trim().slice(0, maxLength);
+}
+
+function normalizeEmail(value) {
+  return cleanString(value, 320).toLowerCase();
 }
 
 function escapeHtml(value) {

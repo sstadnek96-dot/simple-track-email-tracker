@@ -2,14 +2,20 @@ const STORAGE_KEYS = {
   messages: "simpleTrack.messages",
   settings: "simpleTrack.settings",
   installId: "simpleTrack.installId",
+  installSecret: "simpleTrack.installSecret",
   pairing: "simpleTrack.pairing",
+  connectedAccounts: "simpleTrack.connectedAccounts",
+  activeAccountEmail: "simpleTrack.activeAccountEmail",
   deletedMessageIds: "simpleTrack.deletedMessageIds"
 };
 
 const PRODUCTION_API_URL = "https://us-central1-simple-track-prod.cloudfunctions.net/api";
+const WEB_APP_URL = "https://simple-track-prod-app.web.app";
 const ROW_MATCH_DELAY_MS = 3500;
 const BACKEND_REFRESH_ALARM_MINUTES = 15;
 const SIMULATE_ACTIVITY_ALARM_MINUTES = 2;
+const CONNECTION_POLL_ATTEMPTS = 24;
+const CONNECTION_POLL_INTERVAL_MS = 2500;
 
 const DEFAULT_SETTINGS = {
   trackingEnabled: true,
@@ -126,22 +132,29 @@ async function handleMessage(message) {
   if (message.type === "simpleTrack:getState") {
     const settings = await getSettings();
     const installId = await getInstallId();
+    const installSecret = await getInstallSecret();
     const pairing = await getPairing();
+    const connectedAccounts = await getConnectedAccounts();
+    const activeAccountEmail = normalizeEmail(message.accountEmail || (await getActiveAccountEmail()));
+    const accountStatus = getAccountStatus(activeAccountEmail, connectedAccounts);
     let syncError = null;
     let messages = [];
 
     try {
-      messages = await getMessages({ settings, syncBackend: true });
+      messages = await getMessages({ settings, syncBackend: true, accountEmail: activeAccountEmail });
     } catch (error) {
       syncError = error.message;
-      messages = await getMessages({ settings, syncBackend: false });
+      messages = await getMessages({ settings, syncBackend: false, accountEmail: activeAccountEmail });
     }
 
     return {
       ok: true,
       installId,
-      realtimeUrl: getRealtimeUrl(settings, installId),
+      realtimeUrl: getRealtimeUrl(settings, installId, installSecret, activeAccountEmail),
       pairing,
+      connectedAccounts,
+      activeAccountEmail,
+      accountStatus,
       messages,
       settings,
       summary: summarize(messages),
@@ -162,6 +175,14 @@ async function handleMessage(message) {
 
   if (message.type === "simpleTrack:pairInstall") {
     return pairInstallWithCode(message);
+  }
+
+  if (message.type === "simpleTrack:startAccountConnection") {
+    return startAccountConnection(message);
+  }
+
+  if (message.type === "simpleTrack:refreshAccountConnection") {
+    return refreshAccountConnection(message);
   }
 
   if (message.type === "simpleTrack:createTrackedMessage") {
@@ -201,11 +222,26 @@ async function handleMessage(message) {
 
 async function createTrackedMessage(message) {
   const settings = await getSettings();
-  const messages = await getMessages({ settings });
+  const accountEmail = normalizeEmail(message.accountEmail || (await getActiveAccountEmail()));
+  const connectedAccounts = await getConnectedAccounts();
+  const accountStatus = getAccountStatus(accountEmail, connectedAccounts);
+
+  if (accountEmail && accountStatus.status !== "connected") {
+    return {
+      ok: false,
+      code: "account_not_connected",
+      accountEmail,
+      accountStatus,
+      error: `${accountEmail} is not connected to Simple Track yet.`
+    };
+  }
+
+  const messages = await getMessages({ settings, accountEmail });
   const draftMessage = {
     subject: message.subject || "Untitled message",
     recipients: message.recipients || [],
     client: message.client || "Webmail",
+    accountEmail,
     status: "sent",
     opens: 0,
     clicks: 0,
@@ -218,7 +254,8 @@ async function createTrackedMessage(message) {
 
   if (settings.backendBaseUrl) {
     const installId = await getInstallId();
-    const backendResponse = await createBackendMessage(settings, installId, draftMessage);
+    const installSecret = await getInstallSecret();
+    const backendResponse = await createBackendMessage(settings, installId, installSecret, draftMessage);
     backendResponse.tracking = normalizeTrackingResponse(settings, backendResponse);
     const nextMessage = normalizeMessage({
       ...backendResponse.message,
@@ -248,7 +285,7 @@ async function activateTrackedMessage(message) {
 
   const response = await fetch(message.activationUrl, {
     method: "POST",
-    headers: getBackendHeaders(await getSettings())
+    headers: getBackendHeaders(await getSettings(), await getInstallSecret())
   });
   const body = await response.json().catch(() => null);
 
@@ -270,7 +307,9 @@ async function ensureSeedData() {
   const existing = await chrome.storage.local.get([
     STORAGE_KEYS.messages,
     STORAGE_KEYS.settings,
-    STORAGE_KEYS.installId
+    STORAGE_KEYS.installId,
+    STORAGE_KEYS.installSecret,
+    STORAGE_KEYS.connectedAccounts
   ]);
 
   const updates = {};
@@ -287,6 +326,14 @@ async function ensureSeedData() {
     updates[STORAGE_KEYS.installId] = crypto.randomUUID();
   }
 
+  if (!existing[STORAGE_KEYS.installSecret]) {
+    updates[STORAGE_KEYS.installSecret] = randomInstallSecret();
+  }
+
+  if (!Array.isArray(existing[STORAGE_KEYS.connectedAccounts])) {
+    updates[STORAGE_KEYS.connectedAccounts] = [];
+  }
+
   if (Object.keys(updates).length > 0) {
     await chrome.storage.local.set(updates);
   }
@@ -298,11 +345,13 @@ async function getMessages(options = {}) {
   let messages = (result[STORAGE_KEYS.messages] || []).map(normalizeMessage);
 
   if (options.syncBackend && options.settings?.backendBaseUrl) {
-    messages = await refreshBackendMessages(options.settings, messages);
+    messages = await refreshBackendMessages(options.settings, messages, { accountEmail: options.accountEmail });
   }
 
   const deletedIds = await getDeletedMessageIds();
-  return messages.filter((message) => !deletedIds.has(message.id));
+  return messages
+    .filter((message) => !deletedIds.has(message.id))
+    .filter((message) => !options.accountEmail || message.accountEmail === options.accountEmail);
 }
 
 async function getDeletedMessageIds() {
@@ -326,14 +375,82 @@ async function getInstallId() {
   return result[STORAGE_KEYS.installId];
 }
 
+async function getInstallSecret() {
+  await ensureSeedData();
+  const result = await chrome.storage.local.get(STORAGE_KEYS.installSecret);
+  return result[STORAGE_KEYS.installSecret];
+}
+
 async function getPairing() {
   const result = await chrome.storage.local.get(STORAGE_KEYS.pairing);
   return result[STORAGE_KEYS.pairing] || null;
 }
 
+async function getConnectedAccounts() {
+  await ensureSeedData();
+  const result = await chrome.storage.local.get(STORAGE_KEYS.connectedAccounts);
+  return normalizeConnectedAccounts(result[STORAGE_KEYS.connectedAccounts]);
+}
+
+async function getActiveAccountEmail() {
+  const result = await chrome.storage.local.get(STORAGE_KEYS.activeAccountEmail);
+  return normalizeEmail(result[STORAGE_KEYS.activeAccountEmail]);
+}
+
+async function setConnectedAccounts(accounts, activeAccountEmail = "") {
+  const connectedAccounts = normalizeConnectedAccounts(accounts);
+  const activeEmail = normalizeEmail(activeAccountEmail) || connectedAccounts[0]?.email || "";
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.connectedAccounts]: connectedAccounts,
+    [STORAGE_KEYS.activeAccountEmail]: activeEmail
+  });
+  return { connectedAccounts, activeAccountEmail: activeEmail };
+}
+
+function getAccountStatus(accountEmail, connectedAccounts) {
+  const normalizedEmail = normalizeEmail(accountEmail);
+  const accounts = normalizeConnectedAccounts(connectedAccounts);
+  if (!normalizedEmail) {
+    return {
+      status: accounts.length ? "unknown_account" : "not_connected",
+      accountEmail: "",
+      connectedAccounts: accounts
+    };
+  }
+
+  const account = accounts.find((entry) => entry.email === normalizedEmail);
+  return {
+    status: account ? "connected" : "not_connected",
+    accountEmail: normalizedEmail,
+    account: account || null,
+    connectedAccounts: accounts
+  };
+}
+
+function normalizeConnectedAccounts(accounts) {
+  if (!Array.isArray(accounts)) return [];
+  const byEmail = new Map();
+
+  for (const account of accounts) {
+    const email = normalizeEmail(account?.email);
+    if (!email) continue;
+    byEmail.set(email, {
+      email,
+      displayName: String(account.displayName || account.name || email),
+      provider: String(account.provider || "google"),
+      client: String(account.client || "Gmail"),
+      connectedAt: account.connectedAt || new Date().toISOString(),
+      status: account.status || "connected"
+    });
+  }
+
+  return [...byEmail.values()].sort((a, b) => a.email.localeCompare(b.email));
+}
+
 async function pairInstallWithCode(message) {
   const settings = await getSettings();
   const installId = await getInstallId();
+  const installSecret = await getInstallSecret();
   const code = String(message.code || "").trim().toUpperCase();
 
   if (!code) {
@@ -346,8 +463,8 @@ async function pairInstallWithCode(message) {
 
   const response = await fetch(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/app/pair-install`, {
     method: "POST",
-    headers: getBackendHeaders(settings),
-    body: JSON.stringify({ code, installId })
+    headers: getBackendHeaders(settings, installSecret),
+    body: JSON.stringify({ code, installId, installSecret })
   });
   const body = await response.json().catch(() => null);
 
@@ -365,14 +482,100 @@ async function pairInstallWithCode(message) {
   return { ok: true, ...body, pairing };
 }
 
-async function refreshBackendMessages(settings = null, currentMessages = null) {
+async function startAccountConnection(message) {
+  const settings = await getSettings();
+  const installId = await getInstallId();
+  const installSecret = await getInstallSecret();
+  const accountEmail = normalizeEmail(message.accountEmail);
+  const client = String(message.client || "Gmail");
+
+  if (!accountEmail) {
+    return { ok: false, error: "Could not detect the active Gmail account." };
+  }
+
+  const connectUrl = buildConnectUrl({ installId, installSecret, accountEmail, client });
+
+  if (globalThis.chrome?.tabs?.create) {
+    await chrome.tabs.create({ url: connectUrl, active: true });
+  } else if (globalThis.chrome?.windows?.create) {
+    await chrome.windows.create({ url: connectUrl, type: "popup", width: 920, height: 760 });
+  }
+
+  const status = await pollInstallConnection(settings, installId, installSecret, accountEmail);
+  return {
+    ok: status.accountStatus?.status === "connected",
+    connectUrl,
+    ...status
+  };
+}
+
+async function refreshAccountConnection(message = {}) {
+  const settings = await getSettings();
+  const installId = await getInstallId();
+  const installSecret = await getInstallSecret();
+  const accountEmail = normalizeEmail(message.accountEmail || (await getActiveAccountEmail()));
+  const status = await fetchInstallStatus(settings, installId, installSecret, accountEmail);
+
+  await setConnectedAccounts(status.connectedAccounts || [], status.activeAccountEmail || accountEmail);
+  return { ok: true, ...status };
+}
+
+function buildConnectUrl({ installId, installSecret, accountEmail, client }) {
+  const params = new URLSearchParams({
+    installId,
+    installSecret,
+    accountEmail,
+    client,
+    source: "chrome-extension"
+  });
+  return `${WEB_APP_URL}/connect-extension#${params.toString()}`;
+}
+
+async function pollInstallConnection(settings, installId, installSecret, accountEmail) {
+  let lastStatus = null;
+
+  for (let attempt = 0; attempt < CONNECTION_POLL_ATTEMPTS; attempt += 1) {
+    await delay(attempt === 0 ? 1200 : CONNECTION_POLL_INTERVAL_MS);
+    try {
+      lastStatus = await fetchInstallStatus(settings, installId, installSecret, accountEmail);
+      await setConnectedAccounts(lastStatus.connectedAccounts || [], lastStatus.activeAccountEmail || accountEmail);
+      if (lastStatus.accountStatus?.status === "connected") return lastStatus;
+    } catch (error) {
+      lastStatus = { ok: false, error: error.message };
+    }
+  }
+
+  return lastStatus || { ok: false, error: "Connection timed out. Return to Gmail and try again." };
+}
+
+async function fetchInstallStatus(settings, installId, installSecret, accountEmail = "") {
+  const url = new URL(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/install/status`);
+  url.searchParams.set("installId", installId);
+  if (accountEmail) url.searchParams.set("accountEmail", accountEmail);
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: getBackendHeaders(settings, installSecret)
+  });
+  const body = await response.json().catch(() => null);
+
+  if (!response.ok || !body?.ok) {
+    throw new Error(body?.error || `Install status failed (${response.status})`);
+  }
+
+  return body;
+}
+
+async function refreshBackendMessages(settings = null, currentMessages = null, options = {}) {
   const activeSettings = settings || (await getSettings());
   if (!activeSettings.backendBaseUrl) return currentMessages || (await getMessages());
 
   const installId = await getInstallId();
+  const installSecret = await getInstallSecret();
+  const accountEmail = normalizeEmail(options.accountEmail || "");
   const localMessages = currentMessages || (await getMessages());
   const deletedIds = await getDeletedMessageIds();
-  const backendMessages = await fetchBackendMessages(activeSettings, installId);
+  const backendMessages = await fetchBackendMessages(activeSettings, installId, installSecret, accountEmail);
   const mergedMessages = upsertMessages(localMessages, backendMessages.map(normalizeMessage))
     .filter((message) => !deletedIds.has(message.id));
 
@@ -382,12 +585,14 @@ async function refreshBackendMessages(settings = null, currentMessages = null) {
   return mergedMessages;
 }
 
-async function createBackendMessage(settings, installId, draftMessage) {
+async function createBackendMessage(settings, installId, installSecret, draftMessage) {
   const response = await fetch(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/messages`, {
     method: "POST",
-    headers: getBackendHeaders(settings),
+    headers: getBackendHeaders(settings, installSecret),
     body: JSON.stringify({
       installId,
+      installSecret,
+      accountEmail: draftMessage.accountEmail,
       subject: draftMessage.subject,
       recipients: draftMessage.recipients,
       client: draftMessage.client
@@ -418,13 +623,14 @@ function normalizeTrackingResponse(settings, backendResponse) {
   return tracking;
 }
 
-async function fetchBackendMessages(settings, installId) {
+async function fetchBackendMessages(settings, installId, installSecret, accountEmail = "") {
   const url = new URL(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/messages`);
   url.searchParams.set("installId", installId);
+  if (accountEmail) url.searchParams.set("accountEmail", accountEmail);
 
   const response = await fetch(url.toString(), {
     method: "GET",
-    headers: getBackendHeaders(settings)
+    headers: getBackendHeaders(settings, installSecret)
   });
 
   const body = await response.json().catch(() => null);
@@ -436,11 +642,13 @@ async function fetchBackendMessages(settings, installId) {
   return body.messages || [];
 }
 
-function getBackendHeaders(settings) {
-  return {
+function getBackendHeaders(settings, installSecret = "") {
+  const headers = {
     "Content-Type": "application/json",
     "X-Simple-Track-Client": "chrome-extension"
   };
+  if (installSecret) headers["X-Simple-Track-Install-Secret"] = installSecret;
+  return headers;
 }
 
 async function simulateTrackingActivity() {
@@ -519,6 +727,7 @@ function normalizeMessage(message) {
     subject: String(message.subject || "Untitled message"),
     recipients: Array.isArray(message.recipients) ? message.recipients : [],
     client: String(message.client || "Webmail"),
+    accountEmail: normalizeEmail(message.accountEmail),
     status: ["sent", "opened", "clicked"].includes(message.status) ? message.status : "sent",
     opens: Number(message.opens || 0),
     clicks: Number(message.clicks || 0),
@@ -550,10 +759,26 @@ function summarize(messages) {
   };
 }
 
-function getRealtimeUrl(settings, installId) {
+function getRealtimeUrl(settings, installId, installSecret = "", accountEmail = "") {
   if (!settings.backendBaseUrl || !installId) return null;
 
   const url = new URL(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/events`);
   url.searchParams.set("installId", installId);
+  if (installSecret) url.searchParams.set("s", installSecret);
+  if (accountEmail) url.searchParams.set("accountEmail", accountEmail);
   return url.toString();
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function randomInstallSecret() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

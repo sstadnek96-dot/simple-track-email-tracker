@@ -8,6 +8,7 @@ import { mockBootstrap, mockDashboard } from "../hosting/app/src/mockData.js";
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const appUrl = "http://127.0.0.1:4173/?harness=1";
+const connectUrl = "http://127.0.0.1:4173/connect-extension?harness=1#installId=harness-install&installSecret=harness-secret&accountEmail=s.stadnek96@gmail.com&client=Gmail";
 const apiBase = "https://us-central1-simple-track-prod.cloudfunctions.net/api";
 
 run().catch((error) => {
@@ -114,6 +115,16 @@ async function runBrowserChecks() {
       return;
     }
 
+    if (path.endsWith("/connect-extension")) {
+      await json(route, 200, {
+        ok: true,
+        account: mockBootstrap.connectedAccounts[0],
+        installId: "harness-install",
+        linkedMessages: 2
+      });
+      return;
+    }
+
     if (path.endsWith("/pairing-codes")) {
       await json(route, 201, { ok: true, code: "STPAIR42", expiresAt: "2026-05-23T21:00:00.000Z" });
       return;
@@ -187,6 +198,18 @@ async function runBrowserChecks() {
     }
 
     await page.getByRole("button", { name: "Email tracking" }).first().click();
+    await page.waitForSelector("text=Question About Lawncare");
+    assert.equal(await page.getByText("Signed intake package").count(), 0, "default selected account should hide another account's messages");
+    await page.locator(".profile-button").click();
+    await page.locator(".account-switcher select").selectOption("sstadnek96@gmail.com");
+    await page.locator(".profile-button").click();
+    await page.waitForSelector("text=Signed intake package");
+    assert.equal(await page.getByText("Question About Lawncare").count(), 0, "selected account should hide the first account's messages");
+    await page.locator(".profile-button").click();
+    await page.locator(".account-switcher select").selectOption("all");
+    await page.locator(".profile-button").click();
+    await page.waitForSelector("text=Question About Lawncare");
+
     await page.getByPlaceholder(/Search recipients/i).fill("lawncare");
     await page.waitForSelector("text=Question About Lawncare");
     await page.getByPlaceholder(/Search recipients/i).fill("");
@@ -205,8 +228,8 @@ async function runBrowserChecks() {
     await page.waitForSelector("text=Harness upload.pdf");
 
     await page.getByRole("button", { name: "Settings & account" }).first().click();
-    await page.getByRole("button", { name: /Generate code/i }).click();
-    await page.waitForSelector("text=STPAIR42");
+    await page.waitForSelector("text=Chrome extension connection");
+    await page.waitForSelector("text=s.stadnek96@gmail.com");
 
     const isolationStatus = await page.evaluate(async (url) => {
       const response = await fetch(`${url}/app/dashboard`, {
@@ -220,6 +243,12 @@ async function runBrowserChecks() {
     await page.getByLabel("Open navigation").click();
     await page.getByRole("button", { name: "Link clicks" }).last().click();
     await page.waitForSelector("h1:text('Link clicks')");
+
+    await page.goto(connectUrl);
+    await page.waitForSelector("h1:text('Connect Gmail')");
+    await page.getByRole("button", { name: /Use harness account/i }).click();
+    await page.waitForSelector("h1:text('Gmail connected')");
+    await page.waitForSelector("text=without access keys");
   } finally {
     await browser.close();
   }

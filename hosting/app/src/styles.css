@@ -270,6 +270,37 @@ p {
   background: #f2f5f9;
 }
 
+.account-switcher {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0 4px;
+  padding: 12px 0;
+  color: var(--ink);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.account-switcher select {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  color: var(--ink);
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: 0;
+  font-size: 13px;
+}
+
+.account-switcher.empty {
+  grid-template-columns: 16px 1fr;
+  align-items: center;
+  color: var(--muted);
+  font-weight: 750;
+}
+
 .page-header {
   display: flex;
   align-items: flex-start;
@@ -865,6 +896,45 @@ input[type="checkbox"]:checked::after {
   font-weight: 900;
 }
 
+.connected-account-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.connected-account-list span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  color: #075e44;
+  background: #e7f8f0;
+  border: 1px solid #b7ecd2;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.connected-account-list em {
+  color: var(--muted);
+  font-size: 13px;
+  font-style: normal;
+}
+
+.settings-link-button {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  color: #ffffff;
+  text-decoration: none;
+  background: var(--blue);
+  border-radius: 8px;
+  font-weight: 900;
+}
+
 .save-status {
   color: var(--green-dark);
   font-size: 13px;
@@ -953,6 +1023,138 @@ input[type="checkbox"]:checked::after {
   width: 22px;
   height: 22px;
   flex: 0 0 auto;
+}
+
+.connect-page {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 32px 18px;
+  background: #f6f8fb;
+}
+
+.connect-panel {
+  display: grid;
+  width: min(440px, 100%);
+  gap: 20px;
+  text-align: center;
+}
+
+.connect-brand-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.connect-brand-row > span {
+  width: 42px;
+  height: 8px;
+  background-image: radial-gradient(circle, #d6dbe4 2px, transparent 3px);
+  background-size: 14px 8px;
+}
+
+.connect-brand-row .brand-login-logo {
+  width: 42px;
+  height: 42px;
+  padding: 9px;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 10px 24px rgba(16, 24, 40, 0.10);
+}
+
+.connect-panel h1 {
+  font-size: 28px;
+  letter-spacing: 0;
+}
+
+.connect-lede,
+.connect-footnote {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.permissions-card {
+  display: grid;
+  text-align: left;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(16, 24, 40, 0.08);
+}
+
+.permission-item {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 14px;
+  padding: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.permission-item:first-child {
+  border-top: 0;
+}
+
+.permission-item svg {
+  margin-top: 2px;
+  color: var(--green-dark);
+}
+
+.permission-item strong {
+  display: block;
+}
+
+.permission-item p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.signed-in-strip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 12px;
+  color: #344054;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 13px;
+}
+
+.success-banner {
+  padding: 12px 14px;
+  color: #075e44;
+  background: #e7f8f0;
+  border: 1px solid #b7ecd2;
+  border-radius: 8px;
+  font-weight: 850;
+}
+
+.connect-actions {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+}
+
+.connect-actions > button,
+.connect-done-button {
+  width: min(260px, 100%);
+  min-height: 48px;
+  border-radius: 7px;
+  text-decoration: none;
+}
+
+.connect-done-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  background: var(--blue);
+  font-weight: 900;
 }
 
 .ghost-button {

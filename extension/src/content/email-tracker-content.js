@@ -33,9 +33,14 @@
 
   let cachedMessages = [];
   let cachedSettings = {};
+  let connectedAccounts = [];
+  let activeAccountEmail = "";
+  let accountStatus = { status: "unknown_account", accountEmail: "" };
   let decorateQueued = false;
   let activeHoverCard = null;
   let activeHoverAnchor = null;
+  let accountPrompt = null;
+  let accountPromptPromise = null;
   let hoverCloseTimer = null;
   let rowMatchRetryTimer = null;
   let stateRefreshTimer = null;
@@ -46,6 +51,7 @@
   let lastFullStateRefreshAt = 0;
   let lastHoverStateRefreshAt = 0;
   let lastLocation = location.href;
+  let dismissedAccountPromptEmail = "";
 
   init();
 
@@ -86,12 +92,16 @@
     if (globalThis.chrome?.storage?.onChanged) {
       chrome.storage.onChanged.addListener((changes, areaName) => {
         if (areaName !== "local") return;
-        if (changes["simpleTrack.messages"] || changes["simpleTrack.settings"]) {
+        if (changes["simpleTrack.messages"] || changes["simpleTrack.settings"] || changes["simpleTrack.connectedAccounts"]) {
           if (Array.isArray(changes["simpleTrack.messages"]?.newValue)) {
             cachedMessages = mergeMessageList(cachedMessages, changes["simpleTrack.messages"].newValue);
           }
           if (changes["simpleTrack.settings"]?.newValue) {
             cachedSettings = changes["simpleTrack.settings"].newValue;
+          }
+          if (Array.isArray(changes["simpleTrack.connectedAccounts"]?.newValue)) {
+            connectedAccounts = changes["simpleTrack.connectedAccounts"].newValue;
+            accountStatus = getLocalAccountStatus(activeAccountEmail);
           }
           queueDecorate();
         }
@@ -102,9 +112,17 @@
   }
 
   async function refreshState() {
-    const response = await sendMessage({ type: "simpleTrack:getState" });
+    const detectedEmail = detectCurrentMailAccountEmail();
+    const response = await sendMessage({
+      type: "simpleTrack:getState",
+      accountEmail: detectedEmail,
+      client: getClientName()
+    });
     if (!response?.ok) return;
     lastFullStateRefreshAt = Date.now();
+    activeAccountEmail = response.activeAccountEmail || detectedEmail || "";
+    connectedAccounts = response.connectedAccounts || [];
+    accountStatus = response.accountStatus || { status: "unknown_account", accountEmail: activeAccountEmail, connectedAccounts };
     cachedMessages = mergeMessageList(cachedMessages, response.messages || []);
     cachedSettings = response.settings || {};
     syncRealtimeStream(response.realtimeUrl);
@@ -246,12 +264,159 @@
   function decoratePage() {
     removeLegacyComposeControls();
     if (!cachedSettings.trackingEnabled) return;
+    refreshDetectedAccount();
+    updateAccountConnectionPrompt();
+    if (requiresAccountConnection()) {
+      decorateComposeToolbars();
+      return;
+    }
     decorateMessageRows();
     decorateComposeToolbars();
   }
 
   function removeLegacyComposeControls() {
     document.querySelectorAll(".simple-track-compose-toggle").forEach((control) => control.remove());
+  }
+
+  function refreshDetectedAccount() {
+    const detectedEmail = detectCurrentMailAccountEmail();
+    if (detectedEmail && detectedEmail !== activeAccountEmail) {
+      activeAccountEmail = detectedEmail;
+      accountStatus = getLocalAccountStatus(activeAccountEmail);
+      scheduleStateRefresh(250);
+    }
+  }
+
+  function requiresAccountConnection() {
+    if (!isMailClientPage()) return false;
+    if (!activeAccountEmail) return false;
+    return accountStatus.status !== "connected";
+  }
+
+  function getLocalAccountStatus(accountEmail) {
+    const normalizedEmail = normalizeEmail(accountEmail);
+    const account = connectedAccounts.find((entry) => normalizeEmail(entry.email) === normalizedEmail);
+    return {
+      status: account ? "connected" : "not_connected",
+      accountEmail: normalizedEmail,
+      account: account || null,
+      connectedAccounts
+    };
+  }
+
+  function updateAccountConnectionPrompt() {
+    if (!requiresAccountConnection()) {
+      removeAccountPrompt();
+      return;
+    }
+
+    if (dismissedAccountPromptEmail === activeAccountEmail) return;
+    showAccountConnectionPrompt({ modal: false });
+  }
+
+  function removeAccountPrompt() {
+    accountPrompt?.remove();
+    accountPrompt = null;
+    accountPromptPromise = null;
+  }
+
+  function showAccountConnectionPrompt({ modal = true } = {}) {
+    if (accountPromptPromise) {
+      if (!modal || accountPrompt?.dataset.mode === "blocking") return accountPromptPromise;
+      removeAccountPrompt();
+    }
+
+    const existingAccounts = connectedAccounts.map((account) => account.email).filter(Boolean);
+    const prompt = document.createElement("div");
+    prompt.className = "simple-track-account-overlay";
+    prompt.dataset.mode = modal ? "blocking" : "notice";
+
+    const card = document.createElement("section");
+    card.className = "simple-track-account-card";
+
+    const visual = document.createElement("div");
+    visual.className = "simple-track-account-visual";
+    visual.innerHTML = `
+      <div class="simple-track-account-logo">ST</div>
+      <div class="simple-track-account-dots"><span></span><span></span><span></span></div>
+      <div class="simple-track-gmail-logo" aria-hidden="true">
+        <span></span><span></span><span></span><span></span>
+      </div>
+    `;
+
+    const copy = document.createElement("div");
+    copy.className = "simple-track-account-copy";
+
+    const title = document.createElement("h2");
+    title.textContent = existingAccounts.length
+      ? `Switch accounts or enable tracking for ${activeAccountEmail}`
+      : `Enable email tracking for ${activeAccountEmail}`;
+
+    const text = document.createElement("p");
+    text.textContent = existingAccounts.length
+      ? `Simple Track is connected to ${existingAccounts.join(", ")}. Connect this Gmail account before tracking from it.`
+      : "Connect this Gmail account once. After that, tracking works without access keys.";
+
+    const actions = document.createElement("div");
+    actions.className = "simple-track-account-actions";
+
+    const enable = document.createElement("button");
+    enable.type = "button";
+    enable.className = "simple-track-primary-action";
+    enable.textContent = "Enable";
+
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "simple-track-secondary-action";
+    cancel.textContent = modal ? "Send without tracking" : "Cancel";
+
+    const status = document.createElement("p");
+    status.className = "simple-track-account-status";
+    status.textContent = "You stay in control. Revoke access from the web app at any time.";
+
+    actions.append(enable, cancel);
+    copy.append(title, text, actions, status);
+    card.append(visual, copy);
+    prompt.append(card);
+    document.documentElement.append(prompt);
+    accountPrompt = prompt;
+
+    accountPromptPromise = new Promise((resolve) => {
+      enable.addEventListener("click", async () => {
+        enable.disabled = true;
+        cancel.disabled = true;
+        status.textContent = "Opening Simple Track connection page...";
+        const response = await sendMessage({
+          type: "simpleTrack:startAccountConnection",
+          accountEmail: activeAccountEmail,
+          client: getClientName()
+        });
+
+        if (response?.ok || response?.accountStatus?.status === "connected") {
+          connectedAccounts = response.connectedAccounts || connectedAccounts;
+          accountStatus = response.accountStatus || getLocalAccountStatus(activeAccountEmail);
+          status.textContent = `${activeAccountEmail} is connected. Tracking is ready.`;
+          window.setTimeout(() => {
+            removeAccountPrompt();
+            queueDecorate();
+            resolve(true);
+          }, 800);
+          return;
+        }
+
+        enable.disabled = false;
+        cancel.disabled = false;
+        status.textContent = response?.error || "Connection is still pending. Complete the Google sign-in page, then try again.";
+      });
+
+      cancel.addEventListener("click", () => {
+        dismissedAccountPromptEmail = activeAccountEmail;
+        removeAccountPrompt();
+        resolve(false);
+      });
+    });
+
+    return accountPromptPromise;
   }
 
   function decorateMessageRows() {
@@ -305,6 +470,20 @@
 
           const composeRoot = getComposeRoot(sendButton);
           if (composeRoot.dataset.simpleTrackPreparing === "true") return;
+
+          refreshDetectedAccount();
+          if (requiresAccountConnection()) {
+            const shouldTrack = await showAccountConnectionPrompt({ modal: true });
+            if (!shouldTrack) {
+              sendButton.dataset.simpleTrackPrepared = "true";
+              sendButton.click();
+              window.setTimeout(() => {
+                delete sendButton.dataset.simpleTrackPrepared;
+              }, 3000);
+              return;
+            }
+          }
+
           composeRoot.dataset.simpleTrackPreparing = "true";
 
           const details = extractComposeDetails(composeRoot);
@@ -315,7 +494,8 @@
               type: "simpleTrack:createTrackedMessage",
               subject: details.subject,
               recipients: details.recipients,
-              client: getClientName()
+              client: getClientName(),
+              accountEmail: activeAccountEmail
             });
 
             if (response?.ok) {
@@ -1337,6 +1517,79 @@
 
   function getClientName() {
     return isOutlook() ? "Outlook" : "Gmail";
+  }
+
+  function isMailClientPage() {
+    return /mail\.google\.com/i.test(location.hostname) || isOutlook();
+  }
+
+  function detectCurrentMailAccountEmail() {
+    if (isOutlook()) return detectOutlookAccountEmail();
+    return detectGmailAccountEmail();
+  }
+
+  function detectGmailAccountEmail() {
+    const accountControlSelectors = [
+      "a[aria-label*='Google Account' i]",
+      "a[href*='SignOutOptions']",
+      "[aria-label*='Google Account' i]",
+      "[title*='Google Account' i]",
+      "img[alt*='Google Account' i]"
+    ];
+    const accountControlEmail = findEmailInElements(accountControlSelectors.flatMap((selector) => [...document.querySelectorAll(selector)]));
+    if (accountControlEmail) return accountControlEmail;
+
+    const headerEmail = findEmailInElements(
+      [...document.querySelectorAll("[aria-label*='@'], [title*='@'], img[alt*='@']")]
+        .filter((element) => !element.closest("tr.zA, div[role='listitem'], div[role='main'], table[role='grid']"))
+    );
+    if (headerEmail) return headerEmail;
+
+    const urlEmail = extractEmail(decodeURIComponent(location.href));
+    return urlEmail && !isNoReplySystemAddress(urlEmail) ? urlEmail : "";
+  }
+
+  function detectOutlookAccountEmail() {
+    const accountControlEmail = findEmailInElements([
+      ...document.querySelectorAll("[aria-label*='Account' i], [aria-label*='profile' i], [title*='Account' i], [title*='profile' i]")
+    ]);
+    if (accountControlEmail) return accountControlEmail;
+
+    const candidates = [
+      ...document.querySelectorAll("[aria-label*='@'], [title*='@'], [data-email*='@'], [email*='@']")
+    ].filter((element) => !element.closest("[role='listitem'], [role='option'], [role='main']"));
+
+    return findEmailInElements(candidates);
+  }
+
+  function findEmailInElements(elements) {
+    for (const element of elements) {
+      const value = [
+        element.getAttribute("aria-label"),
+        element.getAttribute("title"),
+        element.getAttribute("data-email"),
+        element.getAttribute("email"),
+        element.getAttribute("alt"),
+        element.textContent
+      ].filter(Boolean).join(" ");
+      const email = extractEmail(value);
+      if (email && !isNoReplySystemAddress(email)) return email;
+    }
+
+    return "";
+  }
+
+  function extractEmail(value) {
+    const match = String(value || "").match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+    return match ? normalizeEmail(match[0]) : "";
+  }
+
+  function normalizeEmail(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  function isNoReplySystemAddress(email) {
+    return /^(no-?reply|noreply|notification|notifications)@/i.test(email);
   }
 
   function isOutlook() {

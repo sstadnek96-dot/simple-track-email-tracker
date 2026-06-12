@@ -1,6 +1,7 @@
 const baseMessages = [
   {
     id: "msg-1001",
+    accountEmail: "s.stadnek96@gmail.com",
     recipients: ["spencer.tpp@gmail.com"],
     subject: "test",
     sentAt: "2026-05-23T14:38:00.000Z",
@@ -38,6 +39,7 @@ const baseMessages = [
   },
   {
     id: "msg-1002",
+    accountEmail: "s.stadnek96@gmail.com",
     recipients: ["gardening@usask.ca", "gardenline@usask.ca"],
     subject: "Question About Lawncare From Your Webpage",
     sentAt: "2026-05-19T23:59:00.000Z",
@@ -68,6 +70,7 @@ const baseMessages = [
   },
   {
     id: "msg-1003",
+    accountEmail: "sstadnek96@gmail.com",
     recipients: ["ops@truepoint.ca"],
     subject: "Signed intake package",
     sentAt: "2026-05-18T18:25:00.000Z",
@@ -97,6 +100,7 @@ const baseMessages = [
   },
   {
     id: "msg-1004",
+    accountEmail: "sstadnek96@gmail.com",
     recipients: ["noreply@github.com"],
     subject: "Payment receipt follow-up",
     sentAt: "2026-05-17T17:20:00.000Z",
@@ -132,6 +136,7 @@ function activityFromMessages(messages) {
       type: event.type,
       subject: message.subject,
       recipient: message.recipients[0],
+      accountEmail: message.accountEmail,
       label: event.label,
       url: event.url,
       device: event.device,
@@ -150,6 +155,7 @@ function linksFromMessages(messages) {
         id: `${message.id}-link-${index}`,
         subject: message.subject,
         recipient: message.recipients[0],
+        accountEmail: message.accountEmail,
         label: event.label || "tracked link",
         url: event.url || "",
         type: event.type,
@@ -184,7 +190,27 @@ export const mockBootstrap = {
       trackedMessages: 1000
     }
   },
-  installCount: 1
+  installCount: 1,
+  connectedAccounts: [
+    {
+      id: "s.stadnek96@gmail.com",
+      email: "s.stadnek96@gmail.com",
+      displayName: "Spencer Davidson",
+      provider: "google",
+      client: "Gmail",
+      status: "connected",
+      connectedAt: "2026-05-23T14:30:00.000Z"
+    },
+    {
+      id: "sstadnek96@gmail.com",
+      email: "sstadnek96@gmail.com",
+      displayName: "Spencer Stadnek",
+      provider: "google",
+      client: "Gmail",
+      status: "connected",
+      connectedAt: "2026-05-18T18:20:00.000Z"
+    }
+  ]
 };
 
 export const mockDashboard = {
@@ -271,5 +297,6 @@ export const mockDashboard = {
       pdfViewed: true
     }
   },
-  plan: mockBootstrap.plan
+  plan: mockBootstrap.plan,
+  connectedAccounts: mockBootstrap.connectedAccounts
 };

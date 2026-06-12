@@ -18,10 +18,7 @@ body {
   min-height: 100vh;
   margin: 0;
   color: var(--ink);
-  background:
-    linear-gradient(145deg, rgba(37, 99, 235, 0.10), transparent 28%),
-    linear-gradient(315deg, rgba(22, 163, 74, 0.10), transparent 35%),
-    var(--bg);
+  background: var(--bg);
 }
 
 button,
@@ -196,6 +193,24 @@ input[type="checkbox"]:checked::after {
   color: var(--green);
   font-size: 13px;
   font-weight: 800;
+}
+
+.connected-accounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 12px;
+}
+
+.connected-accounts span {
+  display: inline-flex;
+  padding: 6px 9px;
+  color: #075e44;
+  background: #e7f8f0;
+  border: 1px solid #b7ecd2;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 900;
 }
 
 footer {

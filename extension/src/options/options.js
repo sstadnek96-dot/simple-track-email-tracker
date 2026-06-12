@@ -14,9 +14,9 @@ const DEFAULT_SETTINGS = {
 const form = document.querySelector("#settingsForm");
 const saveState = document.querySelector("#saveState");
 const installIdValue = document.querySelector("#installIdValue");
-const pairingCode = document.querySelector("#pairingCode");
-const pairButton = document.querySelector("#pairButton");
 const pairingState = document.querySelector("#pairingState");
+const connectedAccounts = document.querySelector("#connectedAccounts");
+const openGmailButton = document.querySelector("#openGmailButton");
 
 document.addEventListener("DOMContentLoaded", init);
 
@@ -42,7 +42,7 @@ async function init() {
     }
   });
 
-  pairButton.addEventListener("click", pairExtension);
+  openGmailButton.addEventListener("click", openGmail);
 }
 
 async function sendMessage(message) {
@@ -73,35 +73,30 @@ function fillForm(settings) {
 
 function fillPairing(response) {
   installIdValue.textContent = response?.installId || "Unavailable";
+  connectedAccounts.replaceChildren();
 
-  if (response?.pairing?.orgId) {
-    pairingState.textContent = `Paired. ${Number(response.pairing.linkedMessages || 0)} tracked emails linked.`;
-  } else {
-    pairingState.textContent = "Not paired to the web app yet.";
+  const accounts = Array.isArray(response?.connectedAccounts) ? response.connectedAccounts : [];
+
+  if (accounts.length > 0) {
+    pairingState.textContent = "Connected accounts";
+    for (const account of accounts) {
+      const pill = document.createElement("span");
+      pill.textContent = account.email;
+      connectedAccounts.append(pill);
+    }
+    return;
   }
+
+  pairingState.textContent = "No Gmail accounts connected yet. Open Gmail and click Enable in the Simple Track prompt.";
 }
 
-async function pairExtension() {
-  const code = pairingCode.value.trim().toUpperCase();
-  if (!code) {
-    pairingState.textContent = "Enter the code shown in the web app.";
-    pairingCode.focus();
+function openGmail() {
+  if (globalThis.chrome?.tabs?.create) {
+    chrome.tabs.create({ url: "https://mail.google.com/mail/u/0/#inbox", active: true });
     return;
   }
 
-  pairButton.disabled = true;
-  pairingState.textContent = "Pairing...";
-
-  const response = await sendMessage({ type: "simpleTrack:pairInstall", code });
-  pairButton.disabled = false;
-
-  if (response?.ok) {
-    pairingCode.value = "";
-    pairingState.textContent = `Paired. ${Number(response.linkedMessages || 0)} tracked emails linked.`;
-    return;
-  }
-
-  pairingState.textContent = response?.error || "Pairing failed. Generate a fresh code and try again.";
+  location.href = "https://mail.google.com/";
 }
 
 function readForm() {

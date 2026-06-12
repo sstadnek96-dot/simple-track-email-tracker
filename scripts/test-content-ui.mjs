@@ -8,12 +8,39 @@ const contentCssPath = path.join(root, "extension/src/content/email-tracker-cont
 const browser = await chromium.launch({ headless: true });
 
 try {
+  await testUnconnectedGmailAccountShowsEnablePrompt();
   await testDuplicateSubjectsMapToDistinctRows();
   await testBadgeDoesNotRegressFromStaleStorage();
   await testPendingMessagesDoNotBindToRows();
   console.log("Content UI automation passed.");
 } finally {
   await browser.close();
+}
+
+async function testUnconnectedGmailAccountShowsEnablePrompt() {
+  const page = await openGmailFixture([], "", {
+    activeAccountEmail: "other.account@gmail.com",
+    connectedAccounts: [{ email: "s.stadnek96@gmail.com", displayName: "Spencer Stadnek", provider: "google", client: "Gmail" }],
+    connectionResponse: {
+      ok: true,
+      accountStatus: { status: "connected", accountEmail: "other.account@gmail.com" },
+      connectedAccounts: [
+        { email: "s.stadnek96@gmail.com", displayName: "Spencer Stadnek", provider: "google", client: "Gmail" },
+        { email: "other.account@gmail.com", displayName: "Other Account", provider: "google", client: "Gmail" }
+      ]
+    }
+  });
+
+  await page.waitForSelector(".simple-track-account-overlay");
+  const promptText = await page.locator(".simple-track-account-overlay").innerText();
+  if (!promptText.includes("other.account@gmail.com") || !promptText.includes("Connect this Gmail account")) {
+    throw new Error(`Account prompt did not explain the unconnected account:\n${promptText}`);
+  }
+
+  await page.getByRole("button", { name: "Enable" }).click();
+  await page.waitForFunction(() => window.__simpleTrackStartedConnection === "other.account@gmail.com");
+  await page.waitForSelector(".simple-track-account-overlay", { state: "detached" });
+  await page.close();
 }
 
 async function testDuplicateSubjectsMapToDistinctRows() {
@@ -142,7 +169,7 @@ async function testPendingMessagesDoNotBindToRows() {
   await page.close();
 }
 
-async function openGmailFixture(messages, rowsHtml) {
+async function openGmailFixture(messages, rowsHtml, options = {}) {
   const context = await browser.newContext({
     viewport: { width: 1280, height: 720 },
     timezoneId: "America/Regina"
@@ -156,16 +183,27 @@ async function openGmailFixture(messages, rowsHtml) {
   }));
 
   await page.goto("https://mail.google.com/mail/u/0/#sent");
-  await page.evaluate((mockMessages) => {
+  await page.evaluate(({ mockMessages, options }) => {
     window.__simpleTrackMockMessages = mockMessages;
     window.__simpleTrackStorageListeners = [];
+    window.__simpleTrackStartedConnection = "";
     window.chrome = {
       runtime: {
         sendMessage: async (message) => {
           if (message.type === "simpleTrack:getState") {
+            const accountEmail = options.activeAccountEmail || "";
             return {
               ok: true,
               messages: window.__simpleTrackMockMessages,
+              activeAccountEmail: accountEmail,
+              connectedAccounts: options.connectedAccounts || [],
+              accountStatus: accountEmail
+                ? {
+                  status: (options.connectedAccounts || []).some((account) => account.email === accountEmail) ? "connected" : "not_connected",
+                  accountEmail,
+                  connectedAccounts: options.connectedAccounts || []
+                }
+                : { status: "unknown_account", accountEmail: "", connectedAccounts: options.connectedAccounts || [] },
               settings: {
                 trackingEnabled: true,
                 showUnreadDots: true,
@@ -174,6 +212,10 @@ async function openGmailFixture(messages, rowsHtml) {
                 privacyMode: false
               }
             };
+          }
+          if (message.type === "simpleTrack:startAccountConnection") {
+            window.__simpleTrackStartedConnection = message.accountEmail;
+            return options.connectionResponse || { ok: false, error: "No connection response" };
           }
           return { ok: true };
         }
@@ -186,7 +228,7 @@ async function openGmailFixture(messages, rowsHtml) {
         }
       }
     };
-  }, messages);
+  }, { mockMessages: messages, options });
 
   await page.setContent(`
     <style>
@@ -197,6 +239,7 @@ async function openGmailFixture(messages, rowsHtml) {
       td.subject { width: auto; }
       td.date { width: 86px; text-align: right; white-space: nowrap; }
     </style>
+    <a aria-label="Google Account: Spencer (${options.activeAccountEmail || ""})" href="https://accounts.google.com/SignOutOptions">Account</a>
     <table><tbody>${rowsHtml}</tbody></table>
   `);
 

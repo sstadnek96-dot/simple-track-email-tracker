@@ -143,3 +143,169 @@
   outline: 3px solid rgba(26, 115, 232, 0.30);
   outline-offset: 2px;
 }
+
+.simple-track-account-overlay,
+.simple-track-account-overlay * {
+  box-sizing: border-box;
+}
+
+.simple-track-account-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: rgba(32, 33, 36, 0.46);
+}
+
+.simple-track-account-overlay[data-mode="notice"] {
+  pointer-events: none;
+}
+
+.simple-track-account-overlay[data-mode="notice"] .simple-track-account-card {
+  pointer-events: auto;
+}
+
+.simple-track-account-card {
+  display: grid;
+  grid-template-columns: minmax(220px, 360px) minmax(280px, 1fr);
+  gap: 44px;
+  width: min(890px, calc(100vw - 48px));
+  padding: 56px 66px;
+  color: #202124;
+  background: #ffffff;
+  border: 1px solid #dadce0;
+  border-radius: 8px;
+  box-shadow: 0 18px 38px rgba(32, 33, 36, 0.32);
+}
+
+.simple-track-account-visual {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 18px;
+  min-height: 260px;
+  background: #f8fafc;
+  border-radius: 8px;
+}
+
+.simple-track-account-logo,
+.simple-track-gmail-logo {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  place-items: center;
+  border-radius: 12px;
+}
+
+.simple-track-account-logo {
+  color: #ffffff;
+  background: linear-gradient(135deg, #2563eb, #16a34a);
+  font-size: 17px;
+  font-weight: 900;
+}
+
+.simple-track-account-dots {
+  display: flex;
+  gap: 8px;
+}
+
+.simple-track-account-dots span {
+  width: 7px;
+  height: 7px;
+  background: #d1d5db;
+  border-radius: 999px;
+}
+
+.simple-track-gmail-logo {
+  position: relative;
+  overflow: hidden;
+  background: #ffffff;
+  box-shadow: 0 7px 22px rgba(15, 23, 42, 0.10);
+}
+
+.simple-track-gmail-logo::before {
+  width: 32px;
+  height: 22px;
+  content: "";
+  background:
+    linear-gradient(135deg, #ea4335 0 35%, transparent 35%),
+    linear-gradient(225deg, #4285f4 0 35%, transparent 35%),
+    linear-gradient(45deg, #34a853 0 35%, transparent 35%),
+    linear-gradient(315deg, #fbbc04 0 35%, transparent 35%),
+    #ffffff;
+  border: 3px solid #ea4335;
+  border-top: 0;
+  border-radius: 2px;
+}
+
+.simple-track-account-copy {
+  align-self: center;
+}
+
+.simple-track-account-copy h2 {
+  margin: 0;
+  color: #202124;
+  font-size: 26px;
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: 0;
+}
+
+.simple-track-account-copy p {
+  margin: 14px 0 0;
+  color: #5f6368;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.simple-track-account-actions {
+  display: flex;
+  gap: 14px;
+  margin-top: 26px;
+}
+
+.simple-track-account-actions button {
+  min-width: 92px;
+  height: 38px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  font: 700 14px/1 Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.simple-track-account-actions button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.simple-track-primary-action {
+  color: #ffffff;
+  background: #1a73e8;
+}
+
+.simple-track-secondary-action {
+  color: #5f6368;
+  background: #e0e0e0;
+}
+
+.simple-track-account-status {
+  min-height: 38px;
+  color: #6b7280 !important;
+  font-size: 13px !important;
+}
+
+@media (max-width: 760px) {
+  .simple-track-account-card {
+    grid-template-columns: 1fr;
+    gap: 22px;
+    padding: 28px;
+  }
+
+  .simple-track-account-visual {
+    min-height: 160px;
+  }
+}
