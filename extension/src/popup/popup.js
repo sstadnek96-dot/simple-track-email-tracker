@@ -49,12 +49,6 @@ const POPUP_REFRESH_MS = 2500;
 const REALTIME_HEALTH_REFRESH_MS = 5 * 60 * 1000;
 
 const elements = {
-  openRate: document.querySelector("#openRate"),
-  sentCount: document.querySelector("#sentCount"),
-  openedCount: document.querySelector("#openedCount"),
-  unopenedCount: document.querySelector("#unopenedCount"),
-  clickedCount: document.querySelector("#clickedCount"),
-  attachmentCount: document.querySelector("#attachmentCount"),
   activityList: document.querySelector("#activityList"),
   template: document.querySelector("#messageTemplate"),
   searchInput: document.querySelector("#searchInput"),
@@ -231,14 +225,7 @@ function applyRealtimeMessage(message) {
 }
 
 function render() {
-  const { summary, settings } = currentState;
-
-  elements.openRate.textContent = `${summary.openRate}%`;
-  elements.sentCount.textContent = summary.sent;
-  elements.openedCount.textContent = summary.opened;
-  elements.unopenedCount.textContent = summary.unopened;
-  elements.clickedCount.textContent = summary.clicked;
-  elements.attachmentCount.textContent = summary.attachmentOpened || 0;
+  const { settings } = currentState;
   elements.trackingToggle.checked = Boolean(settings.trackingEnabled);
 
   renderMessages();
@@ -267,11 +254,12 @@ function renderMessages() {
 
   for (const message of messages) {
     const node = elements.template.content.firstElementChild.cloneNode(true);
+    const activityType = getLatestActivityType(message);
     node.dataset.messageId = message.id;
     node.open = openMessageIds.has(message.id);
-    node.classList.toggle("is-opened", message.opens > 0);
-    node.classList.toggle("is-clicked", message.clicks > 0);
-    node.classList.toggle("is-attachment-opened", message.attachmentOpens > 0);
+    node.classList.toggle("is-opened", message.opens > 0 || message.clicks > 0 || message.attachmentOpens > 0);
+    node.classList.toggle("is-clicked", activityType === "click");
+    node.classList.toggle("is-attachment-opened", activityType === "attachment_open");
     node.addEventListener("toggle", () => {
       if (node.open) {
         openMessageIds.add(message.id);
@@ -357,10 +345,11 @@ function getStatus(message) {
   const openLabel = `${message.opens} open${message.opens === 1 ? "" : "s"}`;
   const clickLabel = `${message.clicks} click${message.clicks === 1 ? "" : "s"}`;
   const fileLabel = `${message.attachmentOpens || 0} file${message.attachmentOpens === 1 ? "" : "s"}`;
+  const activityType = getLatestActivityType(message);
 
-  if (message.clicks > 0) return { key: "clicked", label: `${openLabel} / ${clickLabel} / ${fileLabel}`, shortLabel: "Clicked" };
-  if (message.attachmentOpens > 0) return { key: "opened", label: `${openLabel} / ${clickLabel} / ${fileLabel}`, shortLabel: "File opened" };
-  if (message.opens > 0) return { key: "opened", label: `${openLabel} / ${clickLabel} / ${fileLabel}`, shortLabel: "Opened" };
+  if (activityType === "click") return { key: "clicked", label: `${openLabel} / ${clickLabel} / ${fileLabel}`, shortLabel: "Clicked" };
+  if (activityType === "attachment_open") return { key: "opened", label: `${openLabel} / ${clickLabel} / ${fileLabel}`, shortLabel: "File opened" };
+  if (activityType === "open" || message.opens > 0) return { key: "opened", label: `${openLabel} / ${clickLabel} / ${fileLabel}`, shortLabel: "Opened" };
   return { key: "sent", label: `${openLabel} / ${clickLabel} / ${fileLabel}`, shortLabel: "Unread" };
 }
 
@@ -380,16 +369,19 @@ function renderActivity(container, message, status) {
 }
 
 function getActivityPhrase(message, status) {
-  if (status.key === "clicked") {
-    return `had a link clicked ${formatRelativeDate(message.lastActivityAt)} at ${formatTime(message.lastActivityAt)}`;
+  const activityType = getLatestActivityType(message);
+  const activityAt = getLatestActivityAt(message);
+
+  if (activityType === "click") {
+    return `had a link clicked ${formatRelativeDate(activityAt)} at ${formatTime(activityAt)}`;
   }
 
-  if (message.attachmentOpens > 0 && getLastEventType(message) === "attachment_open") {
-    return `had a file opened ${formatRelativeDate(message.lastActivityAt)} at ${formatTime(message.lastActivityAt)}`;
+  if (activityType === "attachment_open") {
+    return `had a file opened ${formatRelativeDate(activityAt)} at ${formatTime(activityAt)}`;
   }
 
-  if (status.key === "opened") {
-    return `was last opened ${formatRelativeDate(message.lastActivityAt)} at ${formatTime(message.lastActivityAt)}`;
+  if (activityType === "open" || status.key === "opened") {
+    return `was last opened ${formatRelativeDate(activityAt)} at ${formatTime(activityAt)}`;
   }
 
   return "has not been opened yet";
@@ -398,7 +390,7 @@ function getActivityPhrase(message, status) {
 function renderEventTimeline(node, message) {
   const timeline = node.querySelector(".event-timeline");
   const eventCount = node.querySelector(".event-count");
-  const events = Array.isArray(message.events) ? message.events : [];
+  const events = getSortedEvents(message);
 
   timeline.replaceChildren();
   eventCount.textContent = events.length ? `${events.length} recent` : "No events";
@@ -467,8 +459,29 @@ function getEventIcon(event) {
 }
 
 function getLastEventType(message) {
-  const events = Array.isArray(message.events) ? message.events : [];
-  return events[0]?.type || "";
+  return getLatestEvent(message)?.type || "";
+}
+
+function getLatestActivityType(message) {
+  const eventType = getLastEventType(message);
+  if (eventType) return eventType;
+  if ((message.attachmentOpens || 0) > 0) return "attachment_open";
+  if ((message.clicks || 0) > 0) return "click";
+  if ((message.opens || 0) > 0) return "open";
+  return "";
+}
+
+function getLatestActivityAt(message) {
+  return getLatestEvent(message)?.createdAt || message.lastActivityAt || message.sentAt;
+}
+
+function getLatestEvent(message) {
+  return getSortedEvents(message)[0] || null;
+}
+
+function getSortedEvents(message) {
+  const events = Array.isArray(message.events) ? message.events.filter(Boolean) : [];
+  return [...events].sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
 }
 
 function compareMessagesByActivity(a, b) {

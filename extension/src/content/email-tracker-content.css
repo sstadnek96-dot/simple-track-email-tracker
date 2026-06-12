@@ -136,7 +136,7 @@
 .simple-track-hover-detail {
   display: grid;
   gap: 4px;
-  margin-top: 5px;
+  margin-top: 6px;
 }
 
 .simple-track-row-badge:focus-visible {

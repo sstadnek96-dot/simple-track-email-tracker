@@ -25,7 +25,7 @@
 
 body {
   width: 420px;
-  min-height: 590px;
+  min-height: 470px;
   margin: 0;
   color: var(--ink);
   background:
@@ -127,151 +127,9 @@ h1 {
   transform: rotate(90deg);
 }
 
-.hero-panel {
-  position: relative;
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  min-height: 112px;
-  padding: 16px 17px;
-  overflow: hidden;
-  color: #ffffff;
-  background:
-    linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(30, 64, 175, 0.80)),
-    #12203f;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 10px;
-  box-shadow: var(--shadow);
-}
-
-.hero-panel::after {
-  position: absolute;
-  top: -20px;
-  right: -10px;
-  width: 115px;
-  height: 115px;
-  content: "";
-  background: url("../../assets/brand/simple-track-logo.svg") center / contain no-repeat;
-  opacity: 0.12;
-}
-
-.eyebrow {
-  color: rgba(255, 255, 255, 0.72);
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.hero-panel strong {
-  display: block;
-  margin-top: 5px;
-  font-size: 42px;
-  line-height: 0.98;
-  letter-spacing: 0;
-}
-
-.hero-caption {
-  display: block;
-  margin-top: 8px;
-  color: rgba(255, 255, 255, 0.70);
-  font-size: 12px;
-}
-
-.hero-chart {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  grid-template-columns: repeat(4, 13px);
-  align-items: end;
-  gap: 7px;
-  min-width: 74px;
-  padding-top: 12px;
-}
-
-.hero-chart span {
-  display: block;
-  border-radius: 8px 8px 3px 3px;
-  background: rgba(255, 255, 255, 0.78);
-}
-
-.hero-chart span:nth-child(1) {
-  height: 28px;
-}
-
-.hero-chart span:nth-child(2) {
-  height: 52px;
-}
-
-.hero-chart span:nth-child(3) {
-  height: 40px;
-}
-
-.hero-chart span:nth-child(4) {
-  height: 72px;
-  background: #7dd3fc;
-}
-
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 8px;
-  margin: 11px 0;
-}
-
-.stats-grid article {
-  position: relative;
-  min-width: 0;
-  padding: 12px 10px 10px;
-  background: rgba(255, 255, 255, 0.94);
-  border: 1px solid var(--line);
-  border-radius: 9px;
-}
-
-.stat-dot {
-  position: absolute;
-  top: 9px;
-  right: 9px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.stat-dot.sent {
-  background: var(--blue);
-}
-
-.stat-dot.opened {
-  background: var(--red);
-}
-
-.stat-dot.unread {
-  background: #94a3b8;
-}
-
-.stat-dot.clicks {
-  background: var(--amber);
-}
-
-.stat-dot.files {
-  background: var(--teal);
-}
-
-.stats-grid span:not(.stat-dot) {
-  display: block;
-  color: #0f172a;
-  font-size: 18px;
-  font-weight: 850;
-}
-
-.stats-grid p {
-  margin-top: 3px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
 .toolbar {
   gap: 9px;
+  margin-top: 2px;
   margin-bottom: 10px;
 }
 
@@ -390,7 +248,7 @@ h1 {
 .activity-list {
   display: grid;
   gap: 9px;
-  max-height: 260px;
+  max-height: 380px;
   overflow: auto;
   padding-right: 4px;
 }

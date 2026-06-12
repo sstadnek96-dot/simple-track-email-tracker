@@ -2,6 +2,7 @@ const STORAGE_KEYS = {
   messages: "simpleTrack.messages",
   settings: "simpleTrack.settings",
   installId: "simpleTrack.installId",
+  pairing: "simpleTrack.pairing",
   deletedMessageIds: "simpleTrack.deletedMessageIds"
 };
 
@@ -125,6 +126,7 @@ async function handleMessage(message) {
   if (message.type === "simpleTrack:getState") {
     const settings = await getSettings();
     const installId = await getInstallId();
+    const pairing = await getPairing();
     let syncError = null;
     let messages = [];
 
@@ -139,6 +141,7 @@ async function handleMessage(message) {
       ok: true,
       installId,
       realtimeUrl: getRealtimeUrl(settings, installId),
+      pairing,
       messages,
       settings,
       summary: summarize(messages),
@@ -155,6 +158,10 @@ async function handleMessage(message) {
     } catch (error) {
       return { ok: true, settings, syncError: error.message };
     }
+  }
+
+  if (message.type === "simpleTrack:pairInstall") {
+    return pairInstallWithCode(message);
   }
 
   if (message.type === "simpleTrack:createTrackedMessage") {
@@ -317,6 +324,45 @@ async function getInstallId() {
   await ensureSeedData();
   const result = await chrome.storage.local.get(STORAGE_KEYS.installId);
   return result[STORAGE_KEYS.installId];
+}
+
+async function getPairing() {
+  const result = await chrome.storage.local.get(STORAGE_KEYS.pairing);
+  return result[STORAGE_KEYS.pairing] || null;
+}
+
+async function pairInstallWithCode(message) {
+  const settings = await getSettings();
+  const installId = await getInstallId();
+  const code = String(message.code || "").trim().toUpperCase();
+
+  if (!code) {
+    return { ok: false, error: "Enter a pairing code from the web app." };
+  }
+
+  if (!settings.backendBaseUrl) {
+    return { ok: false, error: "Tracking service is not configured." };
+  }
+
+  const response = await fetch(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/app/pair-install`, {
+    method: "POST",
+    headers: getBackendHeaders(settings),
+    body: JSON.stringify({ code, installId })
+  });
+  const body = await response.json().catch(() => null);
+
+  if (!response.ok || !body?.ok) {
+    throw new Error(body?.error || `Extension pairing failed (${response.status})`);
+  }
+
+  const pairing = {
+    installId,
+    orgId: body.orgId,
+    linkedMessages: Number(body.linkedMessages || 0),
+    pairedAt: new Date().toISOString()
+  };
+  await chrome.storage.local.set({ [STORAGE_KEYS.pairing]: pairing });
+  return { ok: true, ...body, pairing };
 }
 
 async function refreshBackendMessages(settings = null, currentMessages = null) {

@@ -1,5 +1,18 @@
 {
   "projects": {
     "default": "simple-track-prod"
-  }
+  },
+  "targets": {
+    "simple-track-prod": {
+      "hosting": {
+        "marketing": [
+          "simple-track-prod"
+        ],
+        "app": [
+          "simple-track-prod-app"
+        ]
+      }
+    }
+  },
+  "etags": {}
 }

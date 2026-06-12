@@ -13,6 +13,10 @@ const DEFAULT_SETTINGS = {
 
 const form = document.querySelector("#settingsForm");
 const saveState = document.querySelector("#saveState");
+const installIdValue = document.querySelector("#installIdValue");
+const pairingCode = document.querySelector("#pairingCode");
+const pairButton = document.querySelector("#pairButton");
+const pairingState = document.querySelector("#pairingState");
 
 document.addEventListener("DOMContentLoaded", init);
 
@@ -20,6 +24,7 @@ async function init() {
   const response = await sendMessage({ type: "simpleTrack:getState" });
   const settings = { ...DEFAULT_SETTINGS, ...(response?.settings || {}) };
   fillForm(settings);
+  fillPairing(response);
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -36,6 +41,8 @@ async function init() {
       }, saved.syncError ? 5000 : 1800);
     }
   });
+
+  pairButton.addEventListener("click", pairExtension);
 }
 
 async function sendMessage(message) {
@@ -62,6 +69,39 @@ function fillForm(settings) {
       field.value = value;
     }
   }
+}
+
+function fillPairing(response) {
+  installIdValue.textContent = response?.installId || "Unavailable";
+
+  if (response?.pairing?.orgId) {
+    pairingState.textContent = `Paired. ${Number(response.pairing.linkedMessages || 0)} tracked emails linked.`;
+  } else {
+    pairingState.textContent = "Not paired to the web app yet.";
+  }
+}
+
+async function pairExtension() {
+  const code = pairingCode.value.trim().toUpperCase();
+  if (!code) {
+    pairingState.textContent = "Enter the code shown in the web app.";
+    pairingCode.focus();
+    return;
+  }
+
+  pairButton.disabled = true;
+  pairingState.textContent = "Pairing...";
+
+  const response = await sendMessage({ type: "simpleTrack:pairInstall", code });
+  pairButton.disabled = false;
+
+  if (response?.ok) {
+    pairingCode.value = "";
+    pairingState.textContent = `Paired. ${Number(response.linkedMessages || 0)} tracked emails linked.`;
+    return;
+  }
+
+  pairingState.textContent = response?.error || "Pairing failed. Generate a fresh code and try again.";
 }
 
 function readForm() {

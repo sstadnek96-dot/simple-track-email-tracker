@@ -1,6 +1,8 @@
 const crypto = require("node:crypto");
 const { initializeApp } = require("firebase-admin/app");
+const { getAuth } = require("firebase-admin/auth");
 const { FieldValue, Timestamp, getFirestore } = require("firebase-admin/firestore");
+const { getStorage } = require("firebase-admin/storage");
 const { defineSecret } = require("firebase-functions/params");
 const { setGlobalOptions } = require("firebase-functions/v2");
 const { onRequest } = require("firebase-functions/v2/https");
@@ -13,8 +15,15 @@ setGlobalOptions({
 });
 
 const db = getFirestore();
+const storage = getStorage();
 const simpleTrackIpHashSalt = defineSecret("SIMPLE_TRACK_IP_HASH_SALT");
 const TRACKED_MESSAGES = "trackedMessages";
+const USERS = "users";
+const ORGS = "orgs";
+const INSTALLS = "installs";
+const PAIRING_CODES = "pairingCodes";
+const PDF_FILES = "pdfFiles";
+const RATE_LIMITS = "rateLimits";
 const OPEN_GRACE_PERIOD_MS = Number(process.env.SIMPLE_TRACK_OPEN_GRACE_PERIOD_MS || 0);
 const INTERACTION_GRACE_PERIOD_MS = Number(process.env.SIMPLE_TRACK_INTERACTION_GRACE_PERIOD_MS || 0);
 const TRANSPARENT_GIF = Buffer.from(
@@ -32,6 +41,11 @@ exports.api = onRequest({ secrets: [simpleTrackIpHashSalt], timeoutSeconds: 3600
 
   try {
     const route = normalizeRoute(req.path);
+
+    if (route === "/app" || route.startsWith("/app/")) {
+      await handleAppRequest(req, res, route);
+      return;
+    }
 
     if (req.method === "POST" && route === "/messages") {
       await createTrackedMessage(req, res);
@@ -56,7 +70,7 @@ exports.api = onRequest({ secrets: [simpleTrackIpHashSalt], timeoutSeconds: 3600
     res.status(404).json({ ok: false, error: "Not found" });
   } catch (error) {
     logger.error("Simple Track API error", error);
-    res.status(500).json({ ok: false, error: "Internal server error" });
+    res.status(error.statusCode || 500).json({ ok: false, error: error.statusCode ? error.message : "Internal server error" });
   }
 });
 
@@ -95,6 +109,20 @@ exports.click = onRequest({ secrets: [simpleTrackIpHashSalt] }, async (req, res)
   res.redirect(302, destination || "https://www.google.com");
 });
 
+exports.file = onRequest({ secrets: [simpleTrackIpHashSalt] }, async (req, res) => {
+  try {
+    if (req.method !== "GET") {
+      res.status(405).send("Method not allowed");
+      return;
+    }
+
+    await recordPdfFileView(req, res);
+  } catch (error) {
+    logger.warn("PDF file event was not recorded", { error: error.message });
+    res.redirect(302, "https://simple-track-prod-app.web.app");
+  }
+});
+
 async function createTrackedMessage(req, res) {
   const body = await readJson(req);
   const installId = cleanString(body.installId, 120);
@@ -106,9 +134,11 @@ async function createTrackedMessage(req, res) {
   const now = Timestamp.now();
   const trackingToken = randomToken();
   const docRef = db.collection(TRACKED_MESSAGES).doc();
+  const linkedInstall = installId ? await getInstallForId(installId) : null;
 
   const message = {
     installId,
+    orgId: linkedInstall?.orgId || null,
     subject,
     recipients,
     client,
@@ -269,6 +299,690 @@ function streamTrackedEvents(req, res) {
 
   req.on("close", cleanup);
   sendEvent("ready", { ok: true });
+}
+
+async function handleAppRequest(req, res, route) {
+  const appRoute = route.replace(/^\/app/, "") || "/";
+
+  if (req.method === "POST" && appRoute === "/pair-install") {
+    await enforceAppRateLimit(req, "pair-install", 20, 15 * 60);
+    await pairInstallWithCode(req, res);
+    return;
+  }
+
+  const context = await requireAppContext(req);
+
+  if (req.method === "GET" && appRoute === "/bootstrap") {
+    res.status(200).json({
+      ok: true,
+      user: context.user,
+      org: context.org,
+      membership: context.membership,
+      plan: context.org.plan || getDefaultPlan(),
+      installCount: await countOrgInstalls(context.org.id)
+    });
+    return;
+  }
+
+  if (req.method === "GET" && appRoute === "/dashboard") {
+    res.status(200).json({ ok: true, data: await buildDashboardData(context) });
+    return;
+  }
+
+  if (req.method === "GET" && appRoute === "/activity") {
+    const messages = await getOrgMessages(context.org.id);
+    const files = await getOrgFiles(context.org.id);
+    res.status(200).json({ ok: true, activity: buildActivityTimeline(messages, files) });
+    return;
+  }
+
+  if (req.method === "GET" && appRoute === "/messages") {
+    res.status(200).json({ ok: true, messages: await getOrgMessages(context.org.id) });
+    return;
+  }
+
+  if (req.method === "GET" && appRoute === "/link-clicks") {
+    const messages = await getOrgMessages(context.org.id);
+    res.status(200).json({ ok: true, links: buildLinkClickReport(messages) });
+    return;
+  }
+
+  if (req.method === "GET" && appRoute === "/pdf-analytics") {
+    res.status(200).json({ ok: true, files: await getOrgFiles(context.org.id), plan: context.org.plan || getDefaultPlan() });
+    return;
+  }
+
+  if (req.method === "GET" && appRoute === "/performance") {
+    const messages = await getOrgMessages(context.org.id);
+    const files = await getOrgFiles(context.org.id);
+    res.status(200).json({ ok: true, performance: buildPerformanceReport(messages, files) });
+    return;
+  }
+
+  if (req.method === "GET" && appRoute === "/contacts") {
+    const messages = await getOrgMessages(context.org.id);
+    res.status(200).json({ ok: true, contacts: await buildContactsReport(context.org.id, messages) });
+    return;
+  }
+
+  if (req.method === "POST" && appRoute === "/contacts") {
+    await enforceAppRateLimit(req, "contacts", 60, 60 * 60);
+    await createContact(context, req, res);
+    return;
+  }
+
+  if (req.method === "POST" && appRoute === "/files") {
+    await enforceAppRateLimit(req, "files", 30, 60 * 60);
+    await createPdfFile(context, req, res);
+    return;
+  }
+
+  if (req.method === "GET" && appRoute === "/settings") {
+    res.status(200).json({ ok: true, settings: context.org.settings || getDefaultOrgSettings(), plan: context.org.plan || getDefaultPlan() });
+    return;
+  }
+
+  if (req.method === "PATCH" && appRoute === "/settings") {
+    await enforceAppRateLimit(req, "settings", 60, 60 * 60);
+    await updateOrgSettings(context, req, res);
+    return;
+  }
+
+  if (req.method === "POST" && appRoute === "/pairing-codes") {
+    await enforceAppRateLimit(req, "pairing-codes", 20, 15 * 60);
+    await createPairingCode(context, res);
+    return;
+  }
+
+  if (req.method === "GET" && appRoute === "/export") {
+    await exportOrgCsv(context, req, res);
+    return;
+  }
+
+  res.status(404).json({ ok: false, error: "App route not found" });
+}
+
+async function requireAppContext(req) {
+  const token = getBearerToken(req);
+  if (!token) {
+    const error = new Error("Missing authentication token");
+    error.statusCode = 401;
+    throw error;
+  }
+
+  const decoded = await getAuth().verifyIdToken(token);
+  return ensureUserWorkspace(decoded);
+}
+
+async function ensureUserWorkspace(decoded) {
+  const uid = cleanString(decoded.uid, 160);
+  const email = cleanString(decoded.email, 320);
+  const displayName = cleanString(decoded.name, 160) || email || "Simple Track User";
+  const photoURL = cleanString(decoded.picture, 1000);
+  const now = Timestamp.now();
+  const userRef = db.collection(USERS).doc(uid);
+  const orgRef = db.collection(ORGS).doc(uid);
+  const membershipRef = orgRef.collection("memberships").doc(uid);
+
+  await db.runTransaction(async (transaction) => {
+    const [userSnapshot, orgSnapshot, membershipSnapshot] = await Promise.all([
+      transaction.get(userRef),
+      transaction.get(orgRef),
+      transaction.get(membershipRef)
+    ]);
+
+    transaction.set(userRef, {
+      uid,
+      email,
+      displayName,
+      photoURL,
+      providers: Array.isArray(decoded.firebase?.sign_in_provider) ? decoded.firebase.sign_in_provider : [decoded.firebase?.sign_in_provider].filter(Boolean),
+      lastLoginAt: now,
+      updatedAt: now,
+      createdAt: userSnapshot.exists ? userSnapshot.data().createdAt : now
+    }, { merge: true });
+
+    if (!orgSnapshot.exists) {
+      transaction.set(orgRef, {
+        name: displayName ? `${displayName}'s workspace` : "Simple Track workspace",
+        ownerUid: uid,
+        plan: getDefaultPlan(),
+        settings: getDefaultOrgSettings(),
+        createdAt: now,
+        updatedAt: now
+      });
+    } else {
+      transaction.update(orgRef, { updatedAt: now });
+    }
+
+    if (!membershipSnapshot.exists) {
+      transaction.set(membershipRef, {
+        uid,
+        email,
+        role: "owner",
+        createdAt: now,
+        updatedAt: now
+      });
+    }
+  });
+
+  const [userSnapshot, orgSnapshot, membershipSnapshot] = await Promise.all([
+    userRef.get(),
+    orgRef.get(),
+    membershipRef.get()
+  ]);
+
+  const org = { id: orgSnapshot.id, ...serializeTimestamps(orgSnapshot.data()) };
+  return {
+    uid,
+    user: { id: userSnapshot.id, ...serializeTimestamps(userSnapshot.data()) },
+    org,
+    membership: { id: membershipSnapshot.id, ...serializeTimestamps(membershipSnapshot.data()) }
+  };
+}
+
+async function buildDashboardData(context) {
+  const messages = await getOrgMessages(context.org.id);
+  const files = await getOrgFiles(context.org.id);
+  const contacts = await buildContactsReport(context.org.id, messages);
+
+  return {
+    messages,
+    activity: buildActivityTimeline(messages, files),
+    links: buildLinkClickReport(messages),
+    files,
+    contacts,
+    performance: buildPerformanceReport(messages, files),
+    settings: context.org.settings || getDefaultOrgSettings(),
+    plan: context.org.plan || getDefaultPlan()
+  };
+}
+
+async function getOrgMessages(orgId) {
+  const snapshot = await db
+    .collection(TRACKED_MESSAGES)
+    .where("orgId", "==", orgId)
+    .limit(250)
+    .get();
+
+  return (await Promise.all(snapshot.docs.map((doc) => serializeMessageWithEffectiveStats(doc))))
+    .sort((a, b) => new Date(b.lastActivityAt || b.sentAt).getTime() - new Date(a.lastActivityAt || a.sentAt).getTime());
+}
+
+async function getOrgFiles(orgId) {
+  const snapshot = await db
+    .collection(ORGS)
+    .doc(orgId)
+    .collection(PDF_FILES)
+    .orderBy("createdAt", "desc")
+    .limit(100)
+    .get();
+
+  return snapshot.docs.map((doc) => ({ id: doc.id, ...serializeTimestamps(doc.data()) }));
+}
+
+function buildActivityTimeline(messages, files = []) {
+  const messageEvents = messages.flatMap((message) => {
+    const events = Array.isArray(message.events) ? message.events : [];
+    if (events.length === 0 && message.lastActivityAt) {
+      return [{
+        id: `${message.id}:summary`,
+        type: message.status === "clicked" ? "click" : "open",
+        subject: message.subject,
+        recipient: message.recipients?.[0] || "",
+        createdAt: message.lastActivityAt,
+        source: "email",
+        messageId: message.id
+      }];
+    }
+
+    return events.map((event, index) => ({
+      id: `${message.id}:${index}:${event.createdAt}`,
+      type: event.type,
+      subject: message.subject,
+      recipient: message.recipients?.[0] || "",
+      label: event.label || null,
+      url: event.url || null,
+      device: event.device || message.device || null,
+      location: event.location || message.location || null,
+      createdAt: event.createdAt,
+      source: "email",
+      messageId: message.id
+    }));
+  });
+
+  const fileEvents = files
+    .filter((file) => Number(file.views || 0) > 0 || Number(file.downloads || 0) > 0)
+    .map((file) => ({
+      id: `file:${file.id}`,
+      type: Number(file.downloads || 0) > 0 ? "pdf_download" : "pdf_view",
+      subject: file.name,
+      recipient: "",
+      createdAt: file.lastActivityAt || file.createdAt,
+      source: "pdf",
+      fileId: file.id
+    }));
+
+  return [...messageEvents, ...fileEvents]
+    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+    .slice(0, 200);
+}
+
+function buildLinkClickReport(messages) {
+  return messages.flatMap((message) => {
+    const events = Array.isArray(message.events) ? message.events : [];
+    return events
+      .filter((event) => event.type === "click" || event.type === "attachment_open")
+      .map((event, index) => ({
+        id: `${message.id}:${index}:${event.createdAt}`,
+        messageId: message.id,
+        subject: message.subject,
+        recipient: message.recipients?.[0] || "",
+        label: event.label || getUrlHost(event.url),
+        url: event.url || "",
+        kind: event.kind || (event.type === "attachment_open" ? "document" : "link"),
+        type: event.type,
+        clickedAt: event.createdAt,
+        device: event.device || message.device || null,
+        location: event.location || message.location || null
+      }));
+  }).sort((a, b) => new Date(b.clickedAt || 0).getTime() - new Date(a.clickedAt || 0).getTime());
+}
+
+async function buildContactsReport(orgId, messages) {
+  const contacts = new Map();
+
+  for (const message of messages) {
+    for (const recipient of message.recipients || []) {
+      const key = String(recipient).toLowerCase();
+      if (!key) continue;
+      const existing = contacts.get(key) || {
+        id: key,
+        name: recipient,
+        email: recipient,
+        domain: recipient.includes("@") ? recipient.split("@").pop() : "",
+        lastContactedAt: null,
+        lastHeardFromAt: null,
+        opens: 0,
+        clicks: 0,
+        unsubscribed: false,
+        hardBounced: false
+      };
+
+      existing.lastContactedAt = maxIso(existing.lastContactedAt, message.sentAt);
+      existing.lastHeardFromAt = maxIso(existing.lastHeardFromAt, message.lastActivityAt);
+      existing.opens += Number(message.opens || 0);
+      existing.clicks += Number(message.clicks || 0);
+      contacts.set(key, existing);
+    }
+  }
+
+  const manualSnapshot = await db
+    .collection(ORGS)
+    .doc(orgId)
+    .collection("contacts")
+    .limit(500)
+    .get();
+
+  for (const doc of manualSnapshot.docs) {
+    const contact = { id: doc.id, ...serializeTimestamps(doc.data()) };
+    const key = String(contact.email || doc.id).toLowerCase();
+    contacts.set(key, { ...(contacts.get(key) || {}), ...contact, id: doc.id });
+  }
+
+  return [...contacts.values()].sort((a, b) => new Date(b.lastHeardFromAt || b.lastContactedAt || 0).getTime() - new Date(a.lastHeardFromAt || a.lastContactedAt || 0).getTime());
+}
+
+function buildPerformanceReport(messages, files = []) {
+  const sent = messages.length;
+  const opened = messages.filter((message) => Number(message.opens || 0) > 0).length;
+  const clicked = messages.filter((message) => Number(message.clicks || 0) > 0).length;
+  const pdfViewed = files.filter((file) => Number(file.views || 0) > 0).length;
+  const totalOpens = messages.reduce((sum, message) => sum + Number(message.opens || 0), 0);
+  const totalClicks = messages.reduce((sum, message) => sum + Number(message.clicks || 0), 0);
+
+  return {
+    totals: {
+      sent,
+      opened,
+      clicked,
+      pdfViewed,
+      totalOpens,
+      totalClicks,
+      openRate: sent ? Math.round((opened / sent) * 100) : 0,
+      clickRate: sent ? Math.round((clicked / sent) * 100) : 0,
+      pdfRate: files.length ? Math.round((pdfViewed / files.length) * 100) : 0
+    },
+    heatmap: buildSendHeatmap(messages),
+    sentByDay: groupMessagesByDay(messages, "sentAt"),
+    openedByDay: groupMessagesByDay(messages, "lastActivityAt")
+  };
+}
+
+function buildSendHeatmap(messages) {
+  const grid = Array.from({ length: 7 }, (_, day) => (
+    Array.from({ length: 24 }, (_, hour) => ({ day, hour, count: 0 }))
+  ));
+
+  for (const message of messages) {
+    const date = new Date(message.sentAt || 0);
+    if (!Number.isFinite(date.getTime())) continue;
+    grid[date.getDay()][date.getHours()].count += 1;
+  }
+
+  return grid.flat();
+}
+
+function groupMessagesByDay(messages, field) {
+  const counts = new Map();
+  for (const message of messages) {
+    const date = new Date(message[field] || 0);
+    if (!Number.isFinite(date.getTime())) continue;
+    const key = date.toISOString().slice(0, 10);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, count]) => ({ date, count }));
+}
+
+async function createContact(context, req, res) {
+  const body = await readJson(req);
+  const email = cleanString(body.email, 320).toLowerCase();
+  if (!email || !email.includes("@")) {
+    res.status(400).json({ ok: false, error: "Valid email is required" });
+    return;
+  }
+
+  const now = Timestamp.now();
+  const contact = {
+    email,
+    name: cleanString(body.name, 160) || email,
+    domain: email.split("@").pop(),
+    phone: cleanString(body.phone, 80) || "",
+    source: "manual",
+    unsubscribed: Boolean(body.unsubscribed),
+    hardBounced: Boolean(body.hardBounced),
+    updatedAt: now,
+    createdAt: now
+  };
+  const ref = db.collection(ORGS).doc(context.org.id).collection("contacts").doc(email);
+  await ref.set(contact, { merge: true });
+  await writeAuditLog(context, "contact.upsert", "contact", email, { email });
+  res.status(201).json({ ok: true, contact: { id: ref.id, ...serializeTimestamps(contact) } });
+}
+
+async function createPdfFile(context, req, res) {
+  const body = await readJson(req);
+  const name = cleanString(body.name || body.filename, 240) || "Tracked PDF";
+  const contentType = cleanString(body.contentType, 120) || "application/pdf";
+  const size = Math.max(0, Number(body.size || 0));
+  const now = Timestamp.now();
+  const token = randomToken();
+  const fileRef = db.collection(ORGS).doc(context.org.id).collection(PDF_FILES).doc();
+  const storagePath = `orgs/${context.org.id}/pdfs/${fileRef.id}/${safeFileName(name)}`;
+  const publicBaseUrl = getPublicBaseUrl(req);
+  const trackingUrl = `${publicBaseUrl}/file?f=${encodeURIComponent(fileRef.id)}&o=${encodeURIComponent(context.org.id)}&t=${encodeURIComponent(token)}`;
+  let uploadUrl = null;
+
+  try {
+    const [signedUrl] = await storage.bucket().file(storagePath).getSignedUrl({
+      version: "v4",
+      action: "write",
+      expires: Date.now() + 15 * 60 * 1000,
+      contentType
+    });
+    uploadUrl = signedUrl;
+  } catch (error) {
+    logger.warn("Could not create signed upload URL", { error: error.message });
+  }
+
+  const file = {
+    orgId: context.org.id,
+    name,
+    contentType,
+    size,
+    storagePath,
+    trackingTokenHash: hashSecret(token),
+    trackingUrl,
+    views: 0,
+    downloads: 0,
+    timeSpentSeconds: 0,
+    visitedPages: 0,
+    createdByUid: context.uid,
+    createdAt: now,
+    updatedAt: now,
+    lastActivityAt: null
+  };
+
+  await fileRef.set(file);
+  await writeAuditLog(context, "pdf.create", "pdfFile", fileRef.id, { name, size });
+  res.status(201).json({ ok: true, file: { id: fileRef.id, ...serializeTimestamps(file) }, uploadUrl });
+}
+
+async function recordPdfFileView(req, res) {
+  const fileId = cleanString(req.query.f, 160);
+  const orgId = cleanString(req.query.o, 160);
+  const token = cleanString(req.query.t, 240);
+  const isDownload = String(req.query.d || "") === "1";
+
+  if (!fileId || !orgId || !token) {
+    res.status(400).send("Missing file token");
+    return;
+  }
+
+  const fileRef = db.collection(ORGS).doc(orgId).collection(PDF_FILES).doc(fileId);
+  const snapshot = await fileRef.get();
+  if (!snapshot.exists || snapshot.data().trackingTokenHash !== hashSecret(token)) {
+    res.status(404).send("File not found");
+    return;
+  }
+
+  const now = Timestamp.now();
+  await fileRef.update({
+    views: FieldValue.increment(isDownload ? 0 : 1),
+    downloads: FieldValue.increment(isDownload ? 1 : 0),
+    lastActivityAt: now,
+    updatedAt: now
+  });
+
+  const file = snapshot.data();
+  try {
+    const [readUrl] = await storage.bucket().file(file.storagePath).getSignedUrl({
+      version: "v4",
+      action: "read",
+      expires: Date.now() + 10 * 60 * 1000
+    });
+    res.redirect(302, readUrl);
+  } catch {
+    res.status(200).send("PDF tracking recorded. Upload the file before sharing this link.");
+  }
+}
+
+async function updateOrgSettings(context, req, res) {
+  const body = await readJson(req);
+  const current = context.org.settings || getDefaultOrgSettings();
+  const settings = {
+    ...current,
+    trackEmailsByDefault: toBoolean(body.trackEmailsByDefault, current.trackEmailsByDefault),
+    trackClicksByDefault: toBoolean(body.trackClicksByDefault, current.trackClicksByDefault),
+    privacyMode: toBoolean(body.privacyMode, current.privacyMode),
+    retentionDays: clampNumber(body.retentionDays, 1, 365, current.retentionDays),
+    brandedDomain: cleanString(body.brandedDomain, 240) || current.brandedDomain || "",
+    notifications: {
+      ...current.notifications,
+      emailOpened: toBoolean(body.notifications?.emailOpened, current.notifications.emailOpened),
+      linkClicked: toBoolean(body.notifications?.linkClicked, current.notifications.linkClicked),
+      pdfViewed: toBoolean(body.notifications?.pdfViewed, current.notifications.pdfViewed)
+    }
+  };
+
+  await db.collection(ORGS).doc(context.org.id).update({
+    settings,
+    updatedAt: Timestamp.now()
+  });
+  await writeAuditLog(context, "settings.update", "org", context.org.id, { keys: Object.keys(body) });
+  res.status(200).json({ ok: true, settings });
+}
+
+async function createPairingCode(context, res) {
+  const code = randomPairingCode();
+  const now = Timestamp.now();
+  const expiresAt = Timestamp.fromMillis(Date.now() + 15 * 60 * 1000);
+  const doc = {
+    orgId: context.org.id,
+    createdByUid: context.uid,
+    createdAt: now,
+    expiresAt,
+    usedAt: null
+  };
+
+  await db.collection(PAIRING_CODES).doc(hashSecret(code)).set(doc);
+  await writeAuditLog(context, "pairing_code.create", "org", context.org.id, {});
+  res.status(201).json({ ok: true, code, expiresAt: toIsoString(expiresAt) });
+}
+
+async function pairInstallWithCode(req, res) {
+  const body = await readJson(req);
+  const code = cleanString(body.code, 40).toUpperCase();
+  const installId = cleanString(body.installId, 120);
+
+  if (!code || !installId) {
+    res.status(400).json({ ok: false, error: "Pairing code and install ID are required" });
+    return;
+  }
+
+  const pairingRef = db.collection(PAIRING_CODES).doc(hashSecret(code));
+  const pairingSnapshot = await pairingRef.get();
+  if (!pairingSnapshot.exists) {
+    res.status(404).json({ ok: false, error: "Pairing code not found" });
+    return;
+  }
+
+  const pairing = pairingSnapshot.data();
+  if (pairing.usedAt || toDate(pairing.expiresAt)?.getTime() < Date.now()) {
+    res.status(410).json({ ok: false, error: "Pairing code expired" });
+    return;
+  }
+
+  const now = Timestamp.now();
+  const installRef = db.collection(INSTALLS).doc(installId);
+  const messagesSnapshot = await db
+    .collection(TRACKED_MESSAGES)
+    .where("installId", "==", installId)
+    .limit(500)
+    .get();
+  const batch = db.batch();
+
+  batch.set(installRef, {
+    installId,
+    orgId: pairing.orgId,
+    pairedByUid: pairing.createdByUid,
+    pairedAt: now,
+    updatedAt: now
+  }, { merge: true });
+  batch.update(pairingRef, { usedAt: now, installId });
+  for (const doc of messagesSnapshot.docs) {
+    batch.update(doc.ref, { orgId: pairing.orgId, updatedAt: now });
+  }
+  await batch.commit();
+
+  await writeAuditLog({ uid: pairing.createdByUid, org: { id: pairing.orgId } }, "install.pair", "install", installId, {
+    messageCount: messagesSnapshot.size
+  });
+  res.status(200).json({ ok: true, installId, orgId: pairing.orgId, linkedMessages: messagesSnapshot.size });
+}
+
+async function exportOrgCsv(context, req, res) {
+  const type = cleanString(req.query.type, 40) || "email-tracking";
+  const messages = await getOrgMessages(context.org.id);
+  const files = await getOrgFiles(context.org.id);
+  const contacts = await buildContactsReport(context.org.id, messages);
+  const rows = getCsvRows(type, messages, files, contacts);
+
+  res.set("Content-Type", "text/csv; charset=utf-8");
+  res.set("Content-Disposition", `attachment; filename="simple-track-${type}.csv"`);
+  res.status(200).send(toCsv(rows));
+}
+
+function getCsvRows(type, messages, files, contacts) {
+  if (type === "link-clicks") {
+    return [
+      ["Recipient", "Subject", "Label", "URL", "Type", "Clicked At", "Device", "Location"],
+      ...buildLinkClickReport(messages).map((row) => [row.recipient, row.subject, row.label, row.url, row.type, row.clickedAt, row.device, row.location])
+    ];
+  }
+
+  if (type === "pdf-analytics") {
+    return [
+      ["Name", "Views", "Downloads", "Time Spent", "Created At", "Last Activity"],
+      ...files.map((file) => [file.name, file.views || 0, file.downloads || 0, file.timeSpentSeconds || 0, file.createdAt, file.lastActivityAt])
+    ];
+  }
+
+  if (type === "contacts") {
+    return [
+      ["Name", "Email", "Domain", "Last Contacted", "Last Heard From", "Opens", "Clicks", "Unsubscribed", "Hard Bounced"],
+      ...contacts.map((contact) => [contact.name, contact.email, contact.domain, contact.lastContactedAt, contact.lastHeardFromAt, contact.opens || 0, contact.clicks || 0, contact.unsubscribed, contact.hardBounced])
+    ];
+  }
+
+  return [
+    ["Recipients", "Subject", "Sent At", "Last Activity", "Opens", "Clicks", "Files", "Status"],
+    ...messages.map((message) => [(message.recipients || []).join("; "), message.subject, message.sentAt, message.lastActivityAt, message.opens, message.clicks, message.attachmentOpens, message.status])
+  ];
+}
+
+async function writeAuditLog(context, action, targetType, targetId, metadata = {}) {
+  const orgId = context.org?.id;
+  if (!orgId) return;
+
+  await db.collection(ORGS).doc(orgId).collection("auditLogs").add({
+    actorUid: context.uid || null,
+    action,
+    targetType,
+    targetId,
+    metadata,
+    createdAt: Timestamp.now()
+  });
+}
+
+async function enforceAppRateLimit(req, action, maxRequests, windowSeconds) {
+  const ipHash = hashIp(getRequestIp(req)) || "unknown";
+  const windowMs = windowSeconds * 1000;
+  const windowStart = Math.floor(Date.now() / windowMs) * windowMs;
+  const ref = db.collection(RATE_LIMITS).doc(hashSecret(`app:${action}:${ipHash}:${windowStart}`));
+
+  await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(ref);
+    const currentCount = snapshot.exists ? Number(snapshot.data().count || 0) : 0;
+    if (currentCount >= maxRequests) {
+      const error = new Error("Too many requests. Please try again shortly.");
+      error.statusCode = 429;
+      throw error;
+    }
+
+    transaction.set(ref, {
+      action,
+      ipHash,
+      windowStart: Timestamp.fromMillis(windowStart),
+      windowSeconds,
+      count: currentCount + 1,
+      updatedAt: Timestamp.now(),
+      expiresAt: Timestamp.fromMillis(windowStart + (windowMs * 2))
+    }, { merge: true });
+  });
+}
+
+async function getInstallForId(installId) {
+  const snapshot = await db.collection(INSTALLS).doc(installId).get();
+  return snapshot.exists ? snapshot.data() : null;
+}
+
+async function countOrgInstalls(orgId) {
+  const snapshot = await db.collection(INSTALLS).where("orgId", "==", orgId).limit(1000).get();
+  return snapshot.size;
 }
 
 async function recordEventFromRequest(req, eventType, extraEvent = {}) {
@@ -526,8 +1240,8 @@ function applyCors(req, res) {
   const origin = req.get("origin") || "*";
   res.set("Access-Control-Allow-Origin", origin);
   res.set("Vary", "Origin");
-  res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.set("Access-Control-Allow-Headers", "Content-Type,X-Simple-Track-Client");
+  res.set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Simple-Track-Client");
   res.set("Access-Control-Max-Age", "3600");
 }
 
@@ -537,6 +1251,96 @@ function applyPixelHeaders(res) {
   res.set("Pragma", "no-cache");
   res.set("Expires", "0");
   res.set("X-Content-Type-Options", "nosniff");
+}
+
+function getBearerToken(req) {
+  const header = req.get("authorization") || "";
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : "";
+}
+
+function getDefaultPlan() {
+  return {
+    tier: "free",
+    limits: {
+      pdfs: 5,
+      contacts: 500,
+      trackedMessages: 1000
+    }
+  };
+}
+
+function getDefaultOrgSettings() {
+  return {
+    trackEmailsByDefault: true,
+    trackClicksByDefault: true,
+    privacyMode: false,
+    retentionDays: 90,
+    brandedDomain: "",
+    notifications: {
+      emailOpened: true,
+      linkClicked: true,
+      pdfViewed: true
+    }
+  };
+}
+
+function serializeTimestamps(value) {
+  if (!value || typeof value !== "object") return value;
+  if (value instanceof Timestamp || typeof value.toDate === "function") return toIsoString(value);
+  if (Array.isArray(value)) return value.map(serializeTimestamps);
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, serializeTimestamps(entry)])
+  );
+}
+
+function maxIso(a, b) {
+  const aTime = new Date(a || 0).getTime();
+  const bTime = new Date(b || 0).getTime();
+  if (!Number.isFinite(aTime)) return b || null;
+  if (!Number.isFinite(bTime)) return a || null;
+  return bTime > aTime ? b : a;
+}
+
+function getUrlHost(value) {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return "tracked link";
+  }
+}
+
+function safeFileName(value) {
+  return cleanString(value, 180)
+    .replace(/[^a-z0-9._ -]/gi, "_")
+    .replace(/\s+/g, "-") || "tracked-file.pdf";
+}
+
+function randomPairingCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.randomBytes(8);
+  return [...bytes].map((byte) => alphabet[byte % alphabet.length]).join("");
+}
+
+function toBoolean(value, fallback) {
+  if (typeof value === "boolean") return value;
+  return Boolean(fallback);
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+function toCsv(rows) {
+  return rows
+    .map((row) => row.map((cell) => {
+      const value = String(cell ?? "");
+      return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+    }).join(","))
+    .join("\n");
 }
 
 async function readJson(req) {
@@ -559,6 +1363,7 @@ function getPublicBaseUrl(req) {
 function serializeMessage(id, data) {
   return {
     id,
+    orgId: data.orgId || null,
     subject: data.subject || "Tracked email",
     recipients: Array.isArray(data.recipients) ? data.recipients : [],
     client: data.client || "Webmail",

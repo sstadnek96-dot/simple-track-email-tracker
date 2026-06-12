@@ -9,6 +9,7 @@ const browser = await chromium.launch({ headless: true });
 
 try {
   await testDuplicateSubjectsMapToDistinctRows();
+  await testBadgeDoesNotRegressFromStaleStorage();
   await testPendingMessagesDoNotBindToRows();
   console.log("Content UI automation passed.");
 } finally {
@@ -82,6 +83,39 @@ async function testDuplicateSubjectsMapToDistinctRows() {
   await page.close();
 }
 
+async function testBadgeDoesNotRegressFromStaleStorage() {
+  const sentAt = todayAt(12, 53);
+  const unopened = createMessage("m-live", "live update", sentAt, 0, null, null);
+  const opened = createMessage("m-live", "live update", sentAt, 1, "Chrome on Windows", todayAt(13, 2));
+
+  const page = await openGmailFixture([unopened], `
+    ${gmailRow("To: me", "live update", "12:53 PM")}
+  `);
+
+  let rows = await getRowBadgeState(page);
+  assertRow(rows[0], { id: "m-live", state: "sent", label: "Sent, not read", badgeCount: 1 }, "live row before refresh");
+
+  await page.evaluate((message) => {
+    window.__simpleTrackMockMessages = [message];
+  }, opened);
+
+  await page.locator(".simple-track-row-badge").hover();
+  await page.waitForFunction(() => document.querySelector(".simple-track-row-badge")?.dataset.simpleTrackState === "opened");
+
+  await page.evaluate((message) => {
+    const changes = { "simpleTrack.messages": { newValue: [message] } };
+    for (const listener of window.__simpleTrackStorageListeners || []) {
+      listener(changes, "local");
+    }
+  }, unopened);
+
+  await page.waitForTimeout(120);
+  rows = await getRowBadgeState(page);
+  assertRow(rows[0], { id: "m-live", state: "opened", label: "1 open", badgeCount: 1 }, "live row after stale storage");
+
+  await page.close();
+}
+
 async function testPendingMessagesDoNotBindToRows() {
   const now = new Date();
   now.setSeconds(0, 0);
@@ -123,13 +157,15 @@ async function openGmailFixture(messages, rowsHtml) {
 
   await page.goto("https://mail.google.com/mail/u/0/#sent");
   await page.evaluate((mockMessages) => {
+    window.__simpleTrackMockMessages = mockMessages;
+    window.__simpleTrackStorageListeners = [];
     window.chrome = {
       runtime: {
         sendMessage: async (message) => {
           if (message.type === "simpleTrack:getState") {
             return {
               ok: true,
-              messages: mockMessages,
+              messages: window.__simpleTrackMockMessages,
               settings: {
                 trackingEnabled: true,
                 showUnreadDots: true,
@@ -142,7 +178,13 @@ async function openGmailFixture(messages, rowsHtml) {
           return { ok: true };
         }
       },
-      storage: { onChanged: { addListener() {} } }
+      storage: {
+        onChanged: {
+          addListener(listener) {
+            window.__simpleTrackStorageListeners.push(listener);
+          }
+        }
+      }
     };
   }, messages);
 

@@ -171,6 +171,33 @@ input[type="checkbox"]:checked::after {
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
 }
 
+.pairing-card {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  background: #f8fbff;
+  border: 1px solid #e4ebf5;
+  border-radius: 8px;
+}
+
+.pairing-card strong,
+.pairing-card code {
+  display: block;
+}
+
+.pairing-card code {
+  margin-top: 6px;
+  color: #344054;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.pairing-card p {
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 800;
+}
+
 footer {
   display: flex;
   align-items: center;
@@ -198,6 +225,22 @@ button {
 
 button:hover {
   background: #1d4ed8;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.secondary-action {
+  width: fit-content;
+  color: var(--blue);
+  background: #eef4ff;
+}
+
+.secondary-action:hover {
+  color: #ffffff;
+  background: var(--blue);
 }
 
 @media (max-width: 640px) {

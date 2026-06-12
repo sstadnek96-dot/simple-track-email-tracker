@@ -88,7 +88,7 @@
         if (areaName !== "local") return;
         if (changes["simpleTrack.messages"] || changes["simpleTrack.settings"]) {
           if (Array.isArray(changes["simpleTrack.messages"]?.newValue)) {
-            cachedMessages = changes["simpleTrack.messages"].newValue;
+            cachedMessages = mergeMessageList(cachedMessages, changes["simpleTrack.messages"].newValue);
           }
           if (changes["simpleTrack.settings"]?.newValue) {
             cachedSettings = changes["simpleTrack.settings"].newValue;
@@ -105,7 +105,7 @@
     const response = await sendMessage({ type: "simpleTrack:getState" });
     if (!response?.ok) return;
     lastFullStateRefreshAt = Date.now();
-    cachedMessages = response.messages || [];
+    cachedMessages = mergeMessageList(cachedMessages, response.messages || []);
     cachedSettings = response.settings || {};
     syncRealtimeStream(response.realtimeUrl);
   }
@@ -160,12 +160,7 @@
 
     const existingIndex = cachedMessages.findIndex((trackedMessage) => trackedMessage.id === message.id);
     const existingMessage = existingIndex >= 0 ? cachedMessages[existingIndex] : null;
-    const nextMessage = {
-      ...existingMessage,
-      ...message,
-      rowMatchAfter: existingMessage?.rowMatchAfter || message.rowMatchAfter || null,
-      muted: existingMessage?.muted ?? Boolean(message.muted)
-    };
+    const nextMessage = mergeMessageState(existingMessage, message);
 
     if (existingIndex >= 0) {
       cachedMessages = cachedMessages.map((trackedMessage, index) => index === existingIndex ? nextMessage : trackedMessage);
@@ -174,6 +169,7 @@
     }
 
     cachedMessages.sort(compareMessagesByActivity);
+    updateBadgesForMessage(nextMessage);
     queueDecorate();
     refreshActiveHoverCard();
   }
@@ -271,7 +267,7 @@
     for (const row of rows) {
       if (!isLikelyMessageRow(row)) continue;
 
-      const message = findMessageForRow(row, assignmentCounts);
+      const message = getExistingMessageForRow(row) || findMessageForRow(row, assignmentCounts);
       if (!message) continue;
       if (message.opens === 0 && cachedSettings.showUnreadDots === false) continue;
       if (message.opens > 0 && cachedSettings.showOpenedChecks === false) continue;
@@ -495,6 +491,34 @@
     return message;
   }
 
+  function getExistingMessageForRow(row) {
+    const badge = row.querySelector(".simple-track-row-badge[data-simple-track-message-id]");
+    const messageId = badge?.dataset.simpleTrackMessageId;
+    if (!messageId) return null;
+
+    const message = cachedMessages.find((trackedMessage) => trackedMessage.id === messageId);
+    if (!message || !messageStillMatchesRow(message, row)) return null;
+    return message;
+  }
+
+  function messageStillMatchesRow(message, row) {
+    if (!isMessageReadyForRowMatching(message)) return false;
+
+    const rowText = normalizeText(row.innerText);
+    const subject = normalizeText(message.subject);
+    const subjectText = getRowSubjectText(row);
+
+    if (subject && subjectText) {
+      const subjectMatches = subjectText === subject || textIncludesPhrase(subjectText, subject);
+      if (!subjectMatches) return false;
+    } else if (subject && !textIncludesPhrase(rowText, subject)) {
+      return false;
+    }
+
+    const rowDate = getRowDateInfo(row);
+    return !rowDate || messageMatchesRowDate(message, rowDate);
+  }
+
   function getRowSubjectText(row) {
     const selectors = [
       ".bog",
@@ -546,6 +570,67 @@
     const aTime = getTimeValue(a.lastActivityAt || a.sentAt);
     const bTime = getTimeValue(b.lastActivityAt || b.sentAt);
     return bTime - aTime;
+  }
+
+  function mergeMessageList(existingMessages, incomingMessages) {
+    const existingById = new Map(
+      (existingMessages || [])
+        .filter((message) => message?.id)
+        .map((message) => [message.id, message])
+    );
+
+    return (incomingMessages || [])
+      .filter((message) => message?.id)
+      .map((message) => mergeMessageState(existingById.get(message.id), message));
+  }
+
+  function mergeMessageState(existingMessage, incomingMessage) {
+    if (!incomingMessage?.id) return incomingMessage;
+
+    const opens = Math.max(toCount(existingMessage?.opens), toCount(incomingMessage.opens));
+    const clicks = Math.max(toCount(existingMessage?.clicks), toCount(incomingMessage.clicks));
+    const attachmentOpens = Math.max(toCount(existingMessage?.attachmentOpens), toCount(incomingMessage.attachmentOpens));
+    const existingActivityTime = getTimeValue(existingMessage?.lastActivityAt);
+    const incomingActivityTime = getTimeValue(incomingMessage.lastActivityAt);
+    const newerActivity = existingActivityTime > incomingActivityTime ? existingMessage : incomingMessage;
+    const nextStatus = opens > 0 || clicks > 0 || attachmentOpens > 0
+      ? "opened"
+      : incomingMessage.status || existingMessage?.status || "sent";
+
+    return {
+      ...existingMessage,
+      ...incomingMessage,
+      opens,
+      clicks,
+      attachmentOpens,
+      status: nextStatus,
+      lastActivityAt: newerActivity?.lastActivityAt || incomingMessage.lastActivityAt || existingMessage?.lastActivityAt || null,
+      device: newerActivity?.device || incomingMessage.device || existingMessage?.device || null,
+      location: newerActivity?.location || incomingMessage.location || existingMessage?.location || null,
+      latestEvent: newerActivity?.latestEvent || incomingMessage.latestEvent || existingMessage?.latestEvent || null,
+      recentEvents: mergeRecentEvents(existingMessage?.recentEvents, incomingMessage.recentEvents),
+      rowMatchAfter: existingMessage?.rowMatchAfter || incomingMessage.rowMatchAfter || null,
+      muted: incomingMessage.muted ?? existingMessage?.muted ?? false
+    };
+  }
+
+  function mergeRecentEvents(existingEvents = [], incomingEvents = []) {
+    const byKey = new Map();
+
+    for (const event of [...incomingEvents, ...existingEvents]) {
+      if (!event) continue;
+      const key = event.id || `${event.type || "event"}:${event.createdAt || ""}:${event.targetUrl || ""}`;
+      if (!byKey.has(key)) byKey.set(key, event);
+    }
+
+    return [...byKey.values()]
+      .sort((a, b) => getTimeValue(b.createdAt) - getTimeValue(a.createdAt))
+      .slice(0, 8);
+  }
+
+  function toCount(value) {
+    const count = Number(value || 0);
+    return Number.isFinite(count) ? count : 0;
   }
 
   function isMessageReadyForRowMatching(message) {
@@ -800,6 +885,16 @@
     badge.setAttribute("aria-label", state.label);
   }
 
+  function updateBadgesForMessage(message) {
+    if (!message?.id) return;
+
+    document
+      .querySelectorAll(`.simple-track-row-badge[data-simple-track-message-id="${cssEscape(message.id)}"]`)
+      .forEach((badge) => {
+        if (badge instanceof HTMLElement) updateRowBadge(badge, message);
+      });
+  }
+
   function stopGmailHoverUi(event) {
     event.preventDefault();
     event.stopPropagation();
@@ -859,6 +954,11 @@
     lastHoverStateRefreshAt = now;
 
     await refreshStateOnce();
+    const freshMessage = cachedMessages.find((message) => message.id === badge.dataset.simpleTrackMessageId);
+    if (freshMessage) {
+      updateRowBadge(badge, freshMessage);
+      updateBadgesForMessage(freshMessage);
+    }
     queueDecorate();
 
     if (activeHoverAnchor !== badge || !activeHoverCard || !badge.isConnected) return;
@@ -1263,6 +1363,11 @@
 
   function escapeRegExp(value) {
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function cssEscape(value) {
+    if (globalThis.CSS?.escape) return CSS.escape(String(value));
+    return String(value).replace(/["\\]/g, "\\$&");
   }
 
   function getTimeValue(value) {

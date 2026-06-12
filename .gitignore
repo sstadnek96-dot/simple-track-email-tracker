@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.firebase/
 *.zip
 .DS_Store
 Thumbs.db

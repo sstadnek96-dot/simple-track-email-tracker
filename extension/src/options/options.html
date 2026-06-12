@@ -87,6 +87,22 @@
         </section>
 
         <section>
+          <h2>Web app pairing</h2>
+          <div class="pairing-card">
+            <div>
+              <strong>Extension install ID</strong>
+              <code id="installIdValue">Loading...</code>
+            </div>
+            <p id="pairingState" role="status"></p>
+          </div>
+          <label class="field">
+            <span>Pairing code from Simple Track web app</span>
+            <input id="pairingCode" type="text" maxlength="16" autocomplete="one-time-code" placeholder="ABCD2345">
+          </label>
+          <button id="pairButton" class="secondary-action" type="button">Pair Extension</button>
+        </section>
+
+        <section>
           <h2>Privacy</h2>
           <label class="toggle-row">
             <span>

@@ -8,9 +8,14 @@
     "test": "node scripts/validate-extension.mjs && node scripts/test-content-ui.mjs",
     "test:static": "node scripts/validate-extension.mjs",
     "test:ui": "node scripts/test-content-ui.mjs",
+    "test:web": "node scripts/test-web-app.mjs",
+    "app:dev": "npm --prefix hosting/app run dev",
+    "app:build": "npm --prefix hosting/app run build",
+    "app:preview": "npm --prefix hosting/app run preview",
     "package": "node scripts/package-extension.mjs",
     "firebase:emulators": "firebase emulators:start --only functions,firestore",
     "firebase:deploy": "firebase deploy --only functions,firestore:rules",
+    "firebase:deploy:app": "firebase deploy --only hosting:app",
     "icons": "powershell -ExecutionPolicy Bypass -File scripts/generate-icons.ps1"
   },
   "keywords": [
