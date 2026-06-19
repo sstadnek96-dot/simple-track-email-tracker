@@ -34,6 +34,7 @@
   let cachedMessages = [];
   let cachedSettings = {};
   let connectedAccounts = [];
+  let knownAccounts = [];
   let activeAccountEmail = "";
   let accountStatus = { status: "unknown_account", accountEmail: "" };
   let decorateQueued = false;
@@ -92,7 +93,7 @@
     if (globalThis.chrome?.storage?.onChanged) {
       chrome.storage.onChanged.addListener((changes, areaName) => {
         if (areaName !== "local") return;
-        if (changes["simpleTrack.messages"] || changes["simpleTrack.settings"] || changes["simpleTrack.connectedAccounts"]) {
+        if (changes["simpleTrack.messages"] || changes["simpleTrack.settings"] || changes["simpleTrack.connectedAccounts"] || changes["simpleTrack.knownAccounts"]) {
           if (Array.isArray(changes["simpleTrack.messages"]?.newValue)) {
             cachedMessages = mergeMessageList(cachedMessages, changes["simpleTrack.messages"].newValue);
           }
@@ -101,6 +102,10 @@
           }
           if (Array.isArray(changes["simpleTrack.connectedAccounts"]?.newValue)) {
             connectedAccounts = changes["simpleTrack.connectedAccounts"].newValue;
+            accountStatus = getLocalAccountStatus(activeAccountEmail);
+          }
+          if (Array.isArray(changes["simpleTrack.knownAccounts"]?.newValue)) {
+            knownAccounts = changes["simpleTrack.knownAccounts"].newValue;
             accountStatus = getLocalAccountStatus(activeAccountEmail);
           }
           queueDecorate();
@@ -119,6 +124,7 @@
             ok: true,
             accountEmail,
             client: getClientName(),
+            returnUrl: location.href,
             accountStatus: getLocalAccountStatus(accountEmail)
           });
         } catch (error) {
@@ -143,6 +149,7 @@
     lastFullStateRefreshAt = Date.now();
     activeAccountEmail = response.activeAccountEmail || detectedEmail || "";
     connectedAccounts = response.connectedAccounts || [];
+    knownAccounts = response.knownAccounts || connectedAccounts;
     accountStatus = response.accountStatus || { status: "unknown_account", accountEmail: activeAccountEmail, connectedAccounts };
     cachedMessages = mergeMessageList(cachedMessages, response.messages || []);
     cachedSettings = response.settings || {};
@@ -317,11 +324,13 @@
   function getLocalAccountStatus(accountEmail) {
     const normalizedEmail = normalizeEmail(accountEmail);
     const account = connectedAccounts.find((entry) => normalizeEmail(entry.email) === normalizedEmail);
+    const knownAccount = knownAccounts.find((entry) => normalizeEmail(entry.email) === normalizedEmail);
     return {
-      status: account ? "connected" : "not_connected",
+      status: account ? "connected" : knownAccount ? "login_required" : "not_connected",
       accountEmail: normalizedEmail,
-      account: account || null,
-      connectedAccounts
+      account: account || knownAccount || null,
+      connectedAccounts,
+      knownAccounts
     };
   }
 
@@ -350,6 +359,7 @@
     const existingAccounts = connectedAccounts.map((account) => account.email).filter(Boolean);
     const clientName = getClientName();
     const providerLogoUrl = getProviderLogoUrl(clientName);
+    const isLoginRequired = accountStatus.status === "login_required";
     const prompt = document.createElement("div");
     prompt.className = "simple-track-account-overlay";
     prompt.dataset.mode = modal ? "blocking" : "notice";
@@ -371,12 +381,16 @@
     copy.className = "simple-track-account-copy";
 
     const title = document.createElement("h2");
-    title.textContent = existingAccounts.length
+    title.textContent = isLoginRequired
+      ? `Log back in to Simple Track for ${activeAccountEmail}`
+      : existingAccounts.length
       ? `Connect tracking for ${activeAccountEmail}`
       : `Enable email tracking for ${activeAccountEmail}`;
 
     const text = document.createElement("p");
-    text.textContent = existingAccounts.length
+    text.textContent = isLoginRequired
+      ? `This ${clientName} account was connected before. Log back in to restore tracking for this browser session.`
+      : existingAccounts.length
       ? `Simple Track is already connected to ${existingAccounts.join(", ")}. Connect this ${clientName} account to add it to the same workspace.`
       : `Connect this ${clientName} account once. After that, tracking works without access keys.`;
 
@@ -386,7 +400,7 @@
     const enable = document.createElement("button");
     enable.type = "button";
     enable.className = "simple-track-primary-action";
-    enable.textContent = "Enable";
+    enable.textContent = isLoginRequired ? "Log in" : "Enable";
 
     const cancel = document.createElement("button");
     cancel.type = "button";
@@ -408,11 +422,14 @@
       enable.addEventListener("click", async () => {
         enable.disabled = true;
         cancel.disabled = true;
-        status.textContent = "Opening Simple Track connection page...";
+        status.textContent = isLoginRequired
+          ? "Opening Simple Track login page..."
+          : "Opening Simple Track connection page...";
         const response = await sendMessage({
           type: "simpleTrack:startAccountConnection",
           accountEmail: activeAccountEmail,
-          client: getClientName()
+          client: getClientName(),
+          returnUrl: location.href
         });
 
         if (response?.ok || response?.accountStatus?.status === "connected") {

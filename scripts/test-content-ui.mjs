@@ -9,6 +9,7 @@ const browser = await chromium.launch({ headless: true });
 
 try {
   await testUnconnectedGmailAccountShowsEnablePrompt();
+  await testKnownGmailAccountShowsLoginPrompt();
   await testPopupCanDetectActiveMailAccount();
   await testDuplicateSubjectsMapToDistinctRows();
   await testBadgeDoesNotRegressFromStaleStorage();
@@ -40,7 +41,41 @@ async function testUnconnectedGmailAccountShowsEnablePrompt() {
 
   await page.getByRole("button", { name: "Enable" }).click();
   await page.waitForFunction(() => window.__simpleTrackStartedConnection === "other.account@gmail.com");
+  const connectionMessage = await page.evaluate(() => window.__simpleTrackStartedConnectionMessage);
+  if (!connectionMessage?.returnUrl?.includes("https://mail.google.com/")) {
+    throw new Error(`Connection did not include the current mail return URL:\n${JSON.stringify(connectionMessage, null, 2)}`);
+  }
   await page.waitForSelector(".simple-track-account-overlay", { state: "detached" });
+  await page.close();
+}
+
+async function testKnownGmailAccountShowsLoginPrompt() {
+  const page = await openGmailFixture([], "", {
+    activeAccountEmail: "spencer.tpp@gmail.com",
+    connectedAccounts: [{ email: "s.stadnek96@gmail.com", displayName: "Spencer Stadnek", provider: "google", client: "Gmail" }],
+    knownAccounts: [
+      { email: "s.stadnek96@gmail.com", displayName: "Spencer Stadnek", provider: "google", client: "Gmail" },
+      { email: "spencer.tpp@gmail.com", displayName: "Spencer TPP", provider: "google", client: "Gmail" }
+    ],
+    connectionResponse: {
+      ok: true,
+      accountStatus: { status: "connected", accountEmail: "spencer.tpp@gmail.com" },
+      connectedAccounts: [
+        { email: "s.stadnek96@gmail.com", displayName: "Spencer Stadnek", provider: "google", client: "Gmail" },
+        { email: "spencer.tpp@gmail.com", displayName: "Spencer TPP", provider: "google", client: "Gmail" }
+      ]
+    }
+  });
+
+  await page.waitForSelector(".simple-track-account-overlay");
+  const promptText = await page.locator(".simple-track-account-overlay").innerText();
+  if (!promptText.includes("Log back in to Simple Track for spencer.tpp@gmail.com") || !promptText.includes("was connected before")) {
+    throw new Error(`Known account prompt showed the wrong copy:\n${promptText}`);
+  }
+  if (await page.getByRole("button", { name: "Log in" }).count() !== 1) {
+    throw new Error("Known account prompt did not expose a Log in action");
+  }
+
   await page.close();
 }
 
@@ -225,9 +260,14 @@ async function openGmailFixture(messages, rowsHtml, options = {}) {
               messages: window.__simpleTrackMockMessages,
               activeAccountEmail: accountEmail,
               connectedAccounts: options.connectedAccounts || [],
+              knownAccounts: options.knownAccounts || options.connectedAccounts || [],
               accountStatus: accountEmail
                 ? {
-                  status: (options.connectedAccounts || []).some((account) => account.email === accountEmail) ? "connected" : "not_connected",
+                  status: (options.connectedAccounts || []).some((account) => account.email === accountEmail)
+                    ? "connected"
+                    : (options.knownAccounts || []).some((account) => account.email === accountEmail)
+                      ? "login_required"
+                      : "not_connected",
                   accountEmail,
                   connectedAccounts: options.connectedAccounts || []
                 }
@@ -243,6 +283,7 @@ async function openGmailFixture(messages, rowsHtml, options = {}) {
           }
           if (message.type === "simpleTrack:startAccountConnection") {
             window.__simpleTrackStartedConnection = message.accountEmail;
+            window.__simpleTrackStartedConnectionMessage = message;
             return options.connectionResponse || { ok: false, error: "No connection response" };
           }
           return { ok: true };

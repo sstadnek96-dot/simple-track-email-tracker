@@ -643,17 +643,12 @@ function App() {
     }
 
     const response = await requestExtensionDisconnectAccount(selectedEmail);
-    if (!response?.ok) {
-      setError(`Could not sign out ${selectedEmail} from Simple Track.`);
-      return;
-    }
-
     const remainingAccounts = replaceDisconnectedAccountState(
       selectedEmail,
-      response.connectedAccounts || [],
-      response.activeAccountEmail || ""
+      response?.connectedAccounts || null,
+      response?.activeAccountEmail || ""
     );
-    const nextEmail = normalizeAccountEmail(response.activeAccountEmail) || remainingAccounts[0]?.email || "";
+    const nextEmail = normalizeAccountEmail(response?.activeAccountEmail) || remainingAccounts[0]?.email || "";
 
     if (nextEmail) {
       setActiveMailAccount(nextEmail);
@@ -1206,6 +1201,23 @@ function getMailClientHomeUrl(account) {
     : "https://mail.google.com/";
 }
 
+function getSafeMailReturnUrl(value, account) {
+  try {
+    const url = new URL(String(value || ""));
+    const hostname = url.hostname.toLowerCase();
+    const isGmail = hostname === "mail.google.com";
+    const isOutlook = hostname === "outlook.live.com" ||
+      hostname === "outlook.office.com" ||
+      hostname === "outlook.office365.com";
+    if (!isGmail && !isOutlook) return "";
+    if (getAccountProviderType(account) === "microsoft" && !isOutlook) return "";
+    if (getAccountProviderType(account) !== "microsoft" && !isGmail) return "";
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
 function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, login, loginHarness, getToken, logout }) {
   const [params, setParams] = useState(() => readConnectionParams());
   const [status, setStatus] = useState("idle");
@@ -1223,7 +1235,8 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
     provider: params.provider
   });
   const MailProviderLogo = mailProvider === "microsoft" ? OutlookLogo : GmailLogo;
-  const returnUrl = getMailClientHomeUrl({ email: requestedEmail, client: params.client, provider: params.provider });
+  const returnAccount = { email: requestedEmail, client: params.client, provider: params.provider };
+  const returnUrl = getSafeMailReturnUrl(params.returnUrl, returnAccount) || getMailClientHomeUrl(returnAccount);
   const signedInEmail = normalizeAccountEmail(user?.email);
   const accountMatchesWebLogin = Boolean(user && requestedEmail && signedInEmail === requestedEmail);
 
@@ -1311,6 +1324,14 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
   const visibleMessage = message || error;
   const primaryActionText = user ? `Connect this ${mailClientLabel}` : `Continue with ${mailClientLabel}`;
 
+  useEffect(() => {
+    if (!isConnected || allowHarness || params.source !== "chrome-extension") return undefined;
+    const timeout = window.setTimeout(() => {
+      window.location.assign(returnUrl);
+    }, 900);
+    return () => window.clearTimeout(timeout);
+  }, [allowHarness, isConnected, params.source, returnUrl]);
+
   return (
     <main className="connect-page">
       <section className="connect-panel">
@@ -1397,6 +1418,7 @@ function readConnectionParams() {
     accountEmail: get("accountEmail").toLowerCase(),
     client: get("client") || "Gmail",
     provider: get("provider"),
+    returnUrl: get("returnUrl"),
     source: get("source")
   };
 }

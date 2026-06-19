@@ -150,7 +150,7 @@ async function getActiveTabAccountContext() {
     return { accountEmail: "", client: "", isMailTab: false, detected: false };
   }
 
-  let tabContext = { accountEmail: "", client: "", isMailTab: false, detected: false };
+  let tabContext = { accountEmail: "", client: "", isMailTab: false, detected: false, returnUrl: "" };
 
   try {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -158,7 +158,7 @@ async function getActiveTabAccountContext() {
     const url = String(tab?.url || "");
     const isMailTab = MAIL_HOST_PATTERN.test(url);
     const client = getClientFromUrl(url);
-    tabContext = { accountEmail: "", client, isMailTab, detected: false };
+    tabContext = { accountEmail: "", client, isMailTab, detected: false, returnUrl: isMailTab ? url : "" };
 
     if (!tab?.id || !isMailTab) {
       return tabContext;
@@ -171,6 +171,7 @@ async function getActiveTabAccountContext() {
       client: response?.client || client,
       isMailTab: true,
       detected: Boolean(accountEmail),
+      returnUrl: response?.returnUrl || url,
       accountStatus: response?.accountStatus || null
     };
   } catch (error) {
@@ -452,7 +453,8 @@ async function connectCurrentAccount() {
     const response = await sendMessage({
       type: "simpleTrack:startAccountConnection",
       accountEmail,
-      client: currentState.activeTabAccount?.client || "Gmail"
+      client: currentState.activeTabAccount?.client || "Gmail",
+      returnUrl: currentState.activeTabAccount?.returnUrl || ""
     });
     if (response?.connectedAccounts) {
       currentState = normalizePopupState({

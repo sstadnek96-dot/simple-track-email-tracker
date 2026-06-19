@@ -5,6 +5,7 @@ const STORAGE_KEYS = {
   installSecret: "simpleTrack.installSecret",
   pairing: "simpleTrack.pairing",
   connectedAccounts: "simpleTrack.connectedAccounts",
+  knownAccounts: "simpleTrack.knownAccounts",
   activeAccountEmail: "simpleTrack.activeAccountEmail",
   deletedMessageIds: "simpleTrack.deletedMessageIds"
 };
@@ -152,8 +153,9 @@ async function handleMessage(message) {
     const installSecret = await getInstallSecret();
     const pairing = await getPairing();
     const connectedAccounts = await getConnectedAccounts();
+    const knownAccounts = await getKnownAccounts();
     const activeAccountEmail = normalizeEmail(message.accountEmail || (await getActiveAccountEmail()));
-    const accountStatus = getAccountStatus(activeAccountEmail, connectedAccounts);
+    const accountStatus = getAccountStatus(activeAccountEmail, connectedAccounts, knownAccounts);
     let syncError = null;
     let messages = [];
 
@@ -170,6 +172,7 @@ async function handleMessage(message) {
       realtimeUrl: getRealtimeUrl(settings, installId, installSecret, activeAccountEmail),
       pairing,
       connectedAccounts,
+      knownAccounts,
       activeAccountEmail,
       accountStatus,
       messages,
@@ -373,7 +376,8 @@ async function ensureSeedData() {
     STORAGE_KEYS.settings,
     STORAGE_KEYS.installId,
     STORAGE_KEYS.installSecret,
-    STORAGE_KEYS.connectedAccounts
+    STORAGE_KEYS.connectedAccounts,
+    STORAGE_KEYS.knownAccounts
   ]);
 
   const updates = {};
@@ -396,6 +400,10 @@ async function ensureSeedData() {
 
   if (!Array.isArray(existing[STORAGE_KEYS.connectedAccounts])) {
     updates[STORAGE_KEYS.connectedAccounts] = [];
+  }
+
+  if (!Array.isArray(existing[STORAGE_KEYS.knownAccounts])) {
+    updates[STORAGE_KEYS.knownAccounts] = normalizeConnectedAccounts(existing[STORAGE_KEYS.connectedAccounts] || []);
   }
 
   if (Object.keys(updates).length > 0) {
@@ -456,6 +464,12 @@ async function getConnectedAccounts() {
   return normalizeConnectedAccounts(result[STORAGE_KEYS.connectedAccounts]);
 }
 
+async function getKnownAccounts() {
+  await ensureSeedData();
+  const result = await chrome.storage.local.get(STORAGE_KEYS.knownAccounts);
+  return normalizeConnectedAccounts(result[STORAGE_KEYS.knownAccounts]);
+}
+
 async function getActiveAccountEmail() {
   const result = await chrome.storage.local.get(STORAGE_KEYS.activeAccountEmail);
   return normalizeEmail(result[STORAGE_KEYS.activeAccountEmail]);
@@ -463,32 +477,42 @@ async function getActiveAccountEmail() {
 
 async function setConnectedAccounts(accounts, activeAccountEmail = "") {
   const connectedAccounts = normalizeConnectedAccounts(accounts);
+  const knownAccounts = mergeAccountLists(await getKnownAccounts(), connectedAccounts);
   const activeEmail = normalizeEmail(activeAccountEmail) || connectedAccounts[0]?.email || "";
   await chrome.storage.local.set({
     [STORAGE_KEYS.connectedAccounts]: connectedAccounts,
+    [STORAGE_KEYS.knownAccounts]: knownAccounts,
     [STORAGE_KEYS.activeAccountEmail]: activeEmail
   });
-  return { connectedAccounts, activeAccountEmail: activeEmail };
+  return { connectedAccounts, knownAccounts, activeAccountEmail: activeEmail };
 }
 
-function getAccountStatus(accountEmail, connectedAccounts) {
+function getAccountStatus(accountEmail, connectedAccounts, knownAccounts = []) {
   const normalizedEmail = normalizeEmail(accountEmail);
   const accounts = normalizeConnectedAccounts(connectedAccounts);
+  const known = normalizeConnectedAccounts(knownAccounts);
   if (!normalizedEmail) {
     return {
       status: accounts.length ? "unknown_account" : "not_connected",
       accountEmail: "",
-      connectedAccounts: accounts
+      connectedAccounts: accounts,
+      knownAccounts: known
     };
   }
 
   const account = accounts.find((entry) => entry.email === normalizedEmail);
+  const knownAccount = known.find((entry) => entry.email === normalizedEmail);
   return {
-    status: account ? "connected" : "not_connected",
+    status: account ? "connected" : knownAccount ? "login_required" : "not_connected",
     accountEmail: normalizedEmail,
-    account: account || null,
-    connectedAccounts: accounts
+    account: account || knownAccount || null,
+    connectedAccounts: accounts,
+    knownAccounts: known
   };
+}
+
+function mergeAccountLists(...accountLists) {
+  return normalizeConnectedAccounts(accountLists.flat());
 }
 
 function normalizeConnectedAccounts(accounts) {
@@ -553,12 +577,13 @@ async function startAccountConnection(message) {
   const installSecret = await getInstallSecret();
   const accountEmail = normalizeEmail(message.accountEmail);
   const client = String(message.client || "Gmail");
+  const returnUrl = sanitizeMailReturnUrl(message.returnUrl || "");
 
   if (!accountEmail) {
     return { ok: false, error: "Could not detect the active mail account." };
   }
 
-  const connectUrl = buildConnectUrl({ installId, installSecret, accountEmail, client });
+  const connectUrl = buildConnectUrl({ installId, installSecret, accountEmail, client, returnUrl });
 
   if (globalThis.chrome?.tabs?.create) {
     await chrome.tabs.create({ url: connectUrl, active: true });
@@ -673,7 +698,7 @@ async function disconnectAccount(message = {}) {
   };
 }
 
-function buildConnectUrl({ installId, installSecret, accountEmail, client }) {
+function buildConnectUrl({ installId, installSecret, accountEmail, client, returnUrl = "" }) {
   const params = new URLSearchParams({
     installId,
     installSecret,
@@ -682,7 +707,22 @@ function buildConnectUrl({ installId, installSecret, accountEmail, client }) {
     provider: getProviderForClient(client),
     source: "chrome-extension"
   });
+  if (returnUrl) params.set("returnUrl", returnUrl);
   return `${WEB_APP_URL}/connect-extension#${params.toString()}`;
+}
+
+function sanitizeMailReturnUrl(value = "") {
+  try {
+    const url = new URL(String(value || ""));
+    const hostname = url.hostname.toLowerCase();
+    const allowed = hostname === "mail.google.com" ||
+      hostname === "outlook.live.com" ||
+      hostname === "outlook.office.com" ||
+      hostname === "outlook.office365.com";
+    return allowed ? url.toString() : "";
+  } catch {
+    return "";
+  }
 }
 
 function getProviderForClient(client) {

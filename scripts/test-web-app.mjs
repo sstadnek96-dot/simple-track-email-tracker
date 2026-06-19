@@ -8,8 +8,10 @@ import { mockBootstrap, mockDashboard } from "../hosting/app/src/mockData.js";
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const appUrl = "http://127.0.0.1:4173/?harness=1";
-const connectUrl = "http://127.0.0.1:4173/connect-extension?harness=1#installId=harness-install&installSecret=harness-secret&accountEmail=s.stadnek96@gmail.com&client=Gmail";
-const connectOutlookUrl = "http://127.0.0.1:4173/connect-extension?harness=1#installId=harness-install&installSecret=harness-secret&accountEmail=spencer.stadnek@outlook.com&client=Outlook&provider=microsoft";
+const gmailReturnUrl = "https://mail.google.com/mail/u/3/#inbox";
+const outlookReturnUrl = "https://outlook.live.com/mail/0/inbox";
+const connectUrl = `http://127.0.0.1:4173/connect-extension?harness=1#installId=harness-install&installSecret=harness-secret&accountEmail=s.stadnek96@gmail.com&client=Gmail&source=chrome-extension&returnUrl=${encodeURIComponent(gmailReturnUrl)}`;
+const connectOutlookUrl = `http://127.0.0.1:4173/connect-extension?harness=1#installId=harness-install&installSecret=harness-secret&accountEmail=spencer.stadnek@outlook.com&client=Outlook&provider=microsoft&source=chrome-extension&returnUrl=${encodeURIComponent(outlookReturnUrl)}`;
 const apiBase = "https://us-central1-simple-track-prod.cloudfunctions.net/api";
 const extensionContext = Buffer.from(JSON.stringify({
   extensionId: "harness-extension",
@@ -412,6 +414,11 @@ async function runBrowserChecks() {
     }
     await page.waitForSelector("h1:text('Gmail connected')");
     await page.waitForSelector("text=without access keys");
+    assert.equal(
+      await page.locator(".connect-done-button").getAttribute("href"),
+      gmailReturnUrl,
+      "Gmail connection should return to the exact Gmail account URL"
+    );
 
     await page.goto(connectOutlookUrl);
     await page.waitForSelector("h1:text('Connect Outlook')");
@@ -422,6 +429,11 @@ async function runBrowserChecks() {
     await page.getByRole("button", { name: /Connect this Outlook/i }).click();
     await page.waitForSelector("h1:text('Outlook connected')");
     await page.waitForSelector("text=spencer.stadnek@outlook.com can now use Simple Track from Outlook without access keys.");
+    assert.equal(
+      await page.locator(".connect-done-button").getAttribute("href"),
+      outlookReturnUrl,
+      "Outlook connection should return to the exact Outlook URL"
+    );
     assert.equal(await page.getByText("Switch to spencer.stadnek@outlook.com").count(), 0, "connecting Outlook should not force switching the web login identity");
   } finally {
     await browser.close();
