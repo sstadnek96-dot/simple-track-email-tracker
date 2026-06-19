@@ -1170,6 +1170,12 @@ input[type="checkbox"]:checked::after {
   font-weight: 900;
 }
 
+.settings-link-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .save-status {
   color: var(--green-dark);
   font-size: 13px;
@@ -1370,9 +1376,11 @@ input[type="checkbox"]:checked::after {
 }
 
 .brand-login-logo {
+  display: block;
   width: 22px;
   height: 22px;
   flex: 0 0 auto;
+  object-fit: contain;
 }
 
 .connect-page {

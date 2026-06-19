@@ -9,7 +9,7 @@ import { mockBootstrap, mockDashboard } from "../hosting/app/src/mockData.js";
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const appUrl = "http://127.0.0.1:4173/?harness=1";
 const connectUrl = "http://127.0.0.1:4173/connect-extension?harness=1#installId=harness-install&installSecret=harness-secret&accountEmail=s.stadnek96@gmail.com&client=Gmail";
-const connectMismatchUrl = "http://127.0.0.1:4173/connect-extension?harness=1&mismatch=1#installId=harness-install&installSecret=harness-secret&accountEmail=spencer.tpp@gmail.com&client=Gmail";
+const connectOutlookUrl = "http://127.0.0.1:4173/connect-extension?harness=1#installId=harness-install&installSecret=harness-secret&accountEmail=spencer.stadnek@outlook.com&client=Outlook&provider=microsoft";
 const apiBase = "https://us-central1-simple-track-prod.cloudfunctions.net/api";
 const extensionContext = Buffer.from(JSON.stringify({
   extensionId: "harness-extension",
@@ -121,29 +121,56 @@ async function runBrowserChecks() {
           lastError: null,
           sendMessage(extensionId, message, callback) {
             window.__simpleTrackExternalRequests = window.__simpleTrackExternalRequests || [];
-            window.__simpleTrackExternalRequests.push({ extensionId, accountEmail: message?.accountEmail || "" });
+            window.__simpleTrackExternalRequests.push({ extensionId, type: message?.type || "", accountEmail: message?.accountEmail || "" });
             setTimeout(() => {
+              const connectedAccounts = [
+                {
+                  email: "s.stadnek96@gmail.com",
+                  displayName: "Spencer Davidson",
+                  provider: "google",
+                  client: "Gmail",
+                  status: "connected"
+                },
+                {
+                  email: "spencer.tpp@gmail.com",
+                  displayName: "Spencer Stadnek",
+                  provider: "google",
+                  client: "Gmail",
+                  status: "connected"
+                }
+              ];
+
+              if (message?.type === "simpleTrack:disconnectAccount") {
+                const remainingAccounts = connectedAccounts.filter((account) => account.email !== message.accountEmail);
+                callback({
+                  ok: true,
+                  connectedAccounts: remainingAccounts,
+                  activeAccountEmail: remainingAccounts[0]?.email || "",
+                  accountStatus: {
+                    status: "not_connected",
+                    accountEmail: message.accountEmail,
+                    connectedAccounts: remainingAccounts
+                  }
+                });
+                return;
+              }
+
+              if (message?.type === "simpleTrack:getConnectedAccounts") {
+                callback({
+                  ok: true,
+                  extensionId,
+                  connectedAccounts,
+                  activeAccountEmail: "s.stadnek96@gmail.com"
+                });
+                return;
+              }
+
               callback({
                 ok: true,
                 customToken: `harness-token-${message.accountEmail}`,
                 accountEmail: message.accountEmail,
                 activeAccountEmail: message.accountEmail,
-                connectedAccounts: [
-                  {
-                    email: "s.stadnek96@gmail.com",
-                    displayName: "Spencer Davidson",
-                    provider: "google",
-                    client: "Gmail",
-                    status: "connected"
-                  },
-                  {
-                    email: "spencer.tpp@gmail.com",
-                    displayName: "Spencer Stadnek",
-                    provider: "google",
-                    client: "Gmail",
-                    status: "connected"
-                  }
-                ]
+                connectedAccounts
               });
             }, 0);
           }
@@ -179,9 +206,21 @@ async function runBrowserChecks() {
     }
 
     if (path.endsWith("/connect-extension")) {
+      const body = await request.postDataJSON();
+      const accountEmail = body.accountEmail || mockBootstrap.connectedAccounts[0].email;
+      const client = body.client || "Gmail";
+      const provider = body.provider || (client === "Outlook" ? "microsoft" : "google");
       await json(route, 200, {
         ok: true,
-        account: mockBootstrap.connectedAccounts[0],
+        account: {
+          id: accountEmail,
+          email: accountEmail,
+          displayName: body.accountDisplayName || accountEmail,
+          photoURL: body.accountPhotoURL || "",
+          provider,
+          client,
+          status: "connected"
+        },
         installId: "harness-install",
         linkedMessages: 2
       });
@@ -314,7 +353,14 @@ async function runBrowserChecks() {
       "switching an extension-connected account should not show the no-handoff error"
     );
     await page.locator(".profile-button").click();
-    await page.getByRole("button", { name: "Switch to s.stadnek96@gmail.com" }).click();
+    await page.getByRole("button", { name: /Sign out/i }).click();
+    await page.waitForFunction(() => (
+      window.__simpleTrackExternalRequests || []
+    ).some((request) => request.type === "simpleTrack:disconnectAccount" && request.accountEmail === "spencer.tpp@gmail.com"));
+    await page.waitForSelector("text=Question About Lawncare");
+    await page.locator(".profile-button").click();
+    assert.equal(await profileMenu.getByText("spencer.tpp@gmail.com").count(), 0, "signed-out account should be removed from the web app account menu");
+    await page.getByLabel("Close account menu").click();
 
     await page.getByRole("button", { name: "Email tracking" }).first().click();
     await page.waitForSelector("h1:text('Email tracking')");
@@ -362,19 +408,21 @@ async function runBrowserChecks() {
     if (await page.getByRole("button", { name: /Use harness account/i }).count()) {
       await page.getByRole("button", { name: /Use harness account/i }).click();
     } else {
-      await page.getByRole("button", { name: /Connect this Gmail|Continue to Google/i }).click();
+      await page.getByRole("button", { name: /Connect this Gmail|Continue with Gmail/i }).click();
     }
     await page.waitForSelector("h1:text('Gmail connected')");
     await page.waitForSelector("text=without access keys");
 
-    await page.goto(connectMismatchUrl);
-    await page.waitForSelector("h1:text('Connect Gmail')");
+    await page.goto(connectOutlookUrl);
+    await page.waitForSelector("h1:text('Connect Outlook')");
     if (await page.getByRole("button", { name: /Use harness account/i }).count()) {
       await page.getByRole("button", { name: /Use harness account/i }).click();
     }
-    await page.waitForSelector("text=Signed in as s.stadnek96@gmail.com");
-    await page.waitForSelector("text=Switch to spencer.tpp@gmail.com");
-    assert.equal(await page.getByText("Gmail connected").count(), 0, "wrong signed-in account must not connect the requested Gmail");
+    await page.waitForSelector("text=Signed in to Simple Track as s.stadnek96@gmail.com");
+    await page.getByRole("button", { name: /Connect this Outlook/i }).click();
+    await page.waitForSelector("h1:text('Outlook connected')");
+    await page.waitForSelector("text=spencer.stadnek@outlook.com can now use Simple Track from Outlook without access keys.");
+    assert.equal(await page.getByText("Switch to spencer.stadnek@outlook.com").count(), 0, "connecting Outlook should not force switching the web login identity");
   } finally {
     await browser.close();
   }

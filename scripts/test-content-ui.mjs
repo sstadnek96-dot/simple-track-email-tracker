@@ -34,7 +34,7 @@ async function testUnconnectedGmailAccountShowsEnablePrompt() {
 
   await page.waitForSelector(".simple-track-account-overlay");
   const promptText = await page.locator(".simple-track-account-overlay").innerText();
-  if (!promptText.includes("other.account@gmail.com") || !promptText.includes("Connect this Gmail account")) {
+  if (!promptText.includes("other.account@gmail.com") || !promptText.includes("Connect this Gmail account to add it to the same workspace")) {
     throw new Error(`Account prompt did not explain the unconnected account:\n${promptText}`);
   }
 
@@ -209,6 +209,9 @@ async function openGmailFixture(messages, rowsHtml, options = {}) {
     window.__simpleTrackStartedConnection = "";
     window.chrome = {
       runtime: {
+        getURL(path) {
+          return `chrome-extension://simple-track/${path}`;
+        },
         onMessage: {
           addListener(listener) {
             window.__simpleTrackRuntimeListeners.push(listener);

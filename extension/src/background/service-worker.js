@@ -264,6 +264,10 @@ async function handleExternalMessage(message, sender = {}) {
     };
   }
 
+  if (message?.type === "simpleTrack:disconnectAccount") {
+    return disconnectAccount(message);
+  }
+
   return { ok: false, error: "Unsupported Simple Track web app request." };
 }
 
@@ -551,7 +555,7 @@ async function startAccountConnection(message) {
   const client = String(message.client || "Gmail");
 
   if (!accountEmail) {
-    return { ok: false, error: "Could not detect the active Gmail account." };
+    return { ok: false, error: "Could not detect the active mail account." };
   }
 
   const connectUrl = buildConnectUrl({ installId, installSecret, accountEmail, client });
@@ -675,9 +679,14 @@ function buildConnectUrl({ installId, installSecret, accountEmail, client }) {
     installSecret,
     accountEmail,
     client,
+    provider: getProviderForClient(client),
     source: "chrome-extension"
   });
   return `${WEB_APP_URL}/connect-extension#${params.toString()}`;
+}
+
+function getProviderForClient(client) {
+  return String(client || "").toLowerCase().includes("outlook") ? "microsoft" : "google";
 }
 
 async function pollInstallConnection(settings, installId, installSecret, accountEmail) {
@@ -694,7 +703,7 @@ async function pollInstallConnection(settings, installId, installSecret, account
     }
   }
 
-  return lastStatus || { ok: false, error: "Connection timed out. Return to Gmail and try again." };
+  return lastStatus || { ok: false, error: "Connection timed out. Return to your mail tab and try again." };
 }
 
 async function fetchInstallStatus(settings, installId, installSecret, accountEmail = "") {

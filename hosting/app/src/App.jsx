@@ -405,13 +405,21 @@ function App() {
       setBootstrap(boot);
       setData(dashboard.data);
       const firstAccount = routeParams.accountEmail || dashboard.data?.connectedAccounts?.[0]?.email || boot.connectedAccounts?.[0]?.email || "all";
-      setActiveMailAccount(firstAccount);
+      setActiveMailAccount((current) => {
+        const currentEmail = normalizeAccountEmail(current);
+        return currentEmail && currentEmail !== "all" ? currentEmail : firstAccount;
+      });
       if (routeParams.focusedMessageId) setActivePage("email");
     } catch (loadError) {
       if (allowHarness) {
         setBootstrap(mockBootstrap);
         setData(mockDashboard);
-        setActiveMailAccount(routeParams.accountEmail || mockDashboard.connectedAccounts?.[0]?.email || "all");
+        setActiveMailAccount((current) => {
+          const currentEmail = normalizeAccountEmail(current);
+          return currentEmail && currentEmail !== "all"
+            ? currentEmail
+            : routeParams.accountEmail || mockDashboard.connectedAccounts?.[0]?.email || "all";
+        });
         if (routeParams.focusedMessageId) setActivePage("email");
       } else {
         setError(loadError.message);
@@ -494,6 +502,20 @@ function App() {
 
     return firstSuccessfulExtensionResponse([
       requestExtensionBridge("simpleTrack:createWebAppSession", payload),
+      requestExtensionExternal(payload)
+    ]);
+  }
+
+  function requestExtensionDisconnectAccount(accountEmail = "") {
+    const normalizedEmail = normalizeAccountEmail(accountEmail);
+    if (!normalizedEmail) return Promise.resolve(null);
+    const payload = {
+      type: "simpleTrack:disconnectAccount",
+      accountEmail: normalizedEmail
+    };
+
+    return firstSuccessfulExtensionResponse([
+      requestExtensionBridge("simpleTrack:disconnectAccount", payload),
       requestExtensionExternal(payload)
     ]);
   }
@@ -610,6 +632,74 @@ function App() {
     if (auth.currentUser) await signOut(auth);
   }
 
+  async function disconnectSelectedMailAccount() {
+    setProfileOpen(false);
+    setError("");
+
+    const selectedEmail = normalizeAccountEmail(activeMailAccount) || normalizeAccountEmail(selectedProfileAccount?.email) || normalizeAccountEmail(user?.email);
+    if (!selectedEmail || selectedEmail === "all") {
+      await logout();
+      return;
+    }
+
+    const response = await requestExtensionDisconnectAccount(selectedEmail);
+    if (!response?.ok) {
+      setError(`Could not sign out ${selectedEmail} from Simple Track.`);
+      return;
+    }
+
+    const remainingAccounts = replaceDisconnectedAccountState(
+      selectedEmail,
+      response.connectedAccounts || [],
+      response.activeAccountEmail || ""
+    );
+    const nextEmail = normalizeAccountEmail(response.activeAccountEmail) || remainingAccounts[0]?.email || "";
+
+    if (nextEmail) {
+      setActiveMailAccount(nextEmail);
+      return;
+    }
+
+    await logout();
+  }
+
+  function replaceDisconnectedAccountState(disconnectedEmail, connectedAccounts = null, activeAccountEmail = "") {
+    const disconnected = normalizeAccountEmail(disconnectedEmail);
+    const remainingAccounts = (Array.isArray(connectedAccounts)
+      ? connectedAccounts
+      : profileAccounts
+    )
+      .map(normalizeAccountRecord)
+      .filter((account) => account && account.email !== disconnected);
+    const nextActiveEmail = normalizeAccountEmail(activeAccountEmail) || remainingAccounts[0]?.email || "";
+
+    setExtensionSessionContext((current) => {
+      const handoffTokens = { ...(current?.handoffTokens || {}) };
+      delete handoffTokens[disconnected];
+      const next = {
+        ...(current || {}),
+        activeAccountEmail: nextActiveEmail,
+        handoffAccountEmail: "",
+        handoffToken: "",
+        handoffTokens,
+        connectedAccounts: remainingAccounts
+      };
+      writeStoredExtensionContext(next);
+      return next;
+    });
+
+    setBootstrap((current) => current ? {
+      ...current,
+      connectedAccounts: (current.connectedAccounts || []).filter((account) => normalizeAccountEmail(account.email) !== disconnected)
+    } : current);
+    setData((current) => current ? {
+      ...current,
+      connectedAccounts: (current.connectedAccounts || []).filter((account) => normalizeAccountEmail(account.email) !== disconnected)
+    } : current);
+
+    return remainingAccounts;
+  }
+
   function openSettingsPage() {
     setProfileOpen(false);
     setActivePage("settings");
@@ -708,7 +798,7 @@ function App() {
                   onChangeLogin={changeAppLogin}
                   onOpenSettings={openSettingsPage}
                   onClose={() => setProfileOpen(false)}
-                  onLogout={logout}
+                  onLogout={disconnectSelectedMailAccount}
                 />
               ) : null}
             </div>
@@ -815,7 +905,7 @@ function LoginModal({ error, allowHarness, login, loginHarness }) {
             Continue with Google
           </button>
           <button className="sso-button" type="button" onClick={() => login("microsoft")}>
-            <MicrosoftLogo />
+            <OutlookLogo />
             Continue with Outlook
           </button>
           {allowHarness ? (
@@ -882,15 +972,12 @@ function GoogleLogo() {
   );
 }
 
-function MicrosoftLogo() {
-  return (
-    <svg className="brand-login-logo" viewBox="0 0 24 24" aria-hidden="true">
-      <path fill="#F25022" d="M2 2h9.5v9.5H2V2Z" />
-      <path fill="#7FBA00" d="M12.5 2H22v9.5h-9.5V2Z" />
-      <path fill="#00A4EF" d="M2 12.5h9.5V22H2v-9.5Z" />
-      <path fill="#FFB900" d="M12.5 12.5H22V22h-9.5v-9.5Z" />
-    </svg>
-  );
+function GmailLogo() {
+  return <img className="brand-login-logo" src="/assets/provider/gmail.svg" alt="" />;
+}
+
+function OutlookLogo() {
+  return <img className="brand-login-logo" src="/assets/provider/outlook.svg" alt="" />;
 }
 
 function ProfileMenu({
@@ -940,7 +1027,7 @@ function ProfileMenu({
           <span className="mail-account-avatar neutral"><LogOut size={18} /></span>
           <span className="mail-account-copy">
             <strong>Sign out</strong>
-            <small>End this web app session</small>
+            <small>Disconnect this mail account</small>
           </span>
         </button>
       </div>
@@ -1002,12 +1089,12 @@ function AccountAvatar({ account, className = "" }) {
       )}
       {providerType === "google" ? (
         <span className="provider-badge" aria-hidden="true">
-          <GoogleLogo />
+          <GmailLogo />
         </span>
       ) : null}
       {providerType === "microsoft" ? (
         <span className="provider-badge microsoft" aria-hidden="true">
-          <MicrosoftLogo />
+          <OutlookLogo />
         </span>
       ) : null}
     </span>
@@ -1109,27 +1196,61 @@ function accountStatusRank(status) {
   return 2;
 }
 
+function getMailClientLabel(account) {
+  return getAccountProviderType(account) === "microsoft" ? "Outlook" : "Gmail";
+}
+
+function getMailClientHomeUrl(account) {
+  return getAccountProviderType(account) === "microsoft"
+    ? "https://outlook.live.com/mail/"
+    : "https://mail.google.com/";
+}
+
 function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, login, loginHarness, getToken, logout }) {
-  const [params] = useState(() => readConnectionParams());
+  const [params, setParams] = useState(() => readConnectionParams());
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
   const [connectedAccount, setConnectedAccount] = useState(null);
   const requestedEmail = params.accountEmail || "";
+  const mailProvider = getAccountProviderType({
+    email: requestedEmail,
+    client: params.client,
+    provider: params.provider
+  });
+  const mailClientLabel = getMailClientLabel({
+    email: requestedEmail,
+    client: params.client,
+    provider: params.provider
+  });
+  const MailProviderLogo = mailProvider === "microsoft" ? OutlookLogo : GmailLogo;
+  const returnUrl = getMailClientHomeUrl({ email: requestedEmail, client: params.client, provider: params.provider });
   const signedInEmail = normalizeAccountEmail(user?.email);
-  const hasWrongSignedInAccount = Boolean(user && requestedEmail && signedInEmail !== requestedEmail);
-  const accountMismatchMessage = hasWrongSignedInAccount
-    ? `Signed in as ${user.email}. Switch to ${requestedEmail} before connecting this Gmail account.`
-    : "";
+  const accountMatchesWebLogin = Boolean(user && requestedEmail && signedInEmail === requestedEmail);
 
-  async function continueWithGoogle() {
+  useEffect(() => {
+    function refreshConnectionParams() {
+      setParams(readConnectionParams());
+      setStatus("idle");
+      setMessage("");
+      setConnectedAccount(null);
+      setError("");
+    }
+
+    window.addEventListener("hashchange", refreshConnectionParams);
+    window.addEventListener("popstate", refreshConnectionParams);
+    return () => {
+      window.removeEventListener("hashchange", refreshConnectionParams);
+      window.removeEventListener("popstate", refreshConnectionParams);
+    };
+  }, [setError]);
+
+  async function continueConnection() {
     setStatus("signing-in");
     setError("");
     setMessage("");
     try {
       if (!user) {
-        await login("google", requestedEmail);
-      } else if (hasWrongSignedInAccount) {
-        await chooseAnotherAccount();
+        await login(mailProvider, requestedEmail);
       } else {
         await connectSignedInUser();
       }
@@ -1141,24 +1262,13 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
 
   useEffect(() => {
     if (!user || status !== "signing-in") return;
-    if (hasWrongSignedInAccount) {
-      setStatus("wrong-account");
-      setMessage(accountMismatchMessage);
-      return;
-    }
     connectSignedInUser();
-  }, [user, status, hasWrongSignedInAccount, accountMismatchMessage]);
+  }, [user, status]);
 
   async function connectSignedInUser() {
     if (!params.installId || !params.installSecret || !requestedEmail) {
       setStatus("failed");
-      setMessage("The extension connection link is missing required details. Return to Gmail and click Enable again.");
-      return;
-    }
-
-    if (hasWrongSignedInAccount) {
-      setStatus("wrong-account");
-      setMessage(accountMismatchMessage);
+      setMessage(`The extension connection link is missing required details. Return to ${mailClientLabel} and click Enable again.`);
       return;
     }
 
@@ -1168,14 +1278,14 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
         installId: params.installId,
         installSecret: params.installSecret,
         accountEmail: requestedEmail,
-        client: params.client || "Gmail",
-        provider: "google",
-        accountDisplayName: user?.displayName || requestedEmail,
-        accountPhotoURL: user?.photoURL || ""
+        client: params.client || mailClientLabel,
+        provider: mailProvider,
+        accountDisplayName: accountMatchesWebLogin ? (user?.displayName || requestedEmail) : requestedEmail,
+        accountPhotoURL: accountMatchesWebLogin ? (user?.photoURL || "") : ""
       });
       setConnectedAccount(response.account);
       setStatus("connected");
-      setMessage(`${requestedEmail} is connected. You can return to Gmail.`);
+      setMessage(`${requestedEmail} is connected. You can return to ${mailClientLabel}.`);
     } catch (connectError) {
       setStatus("failed");
       setMessage(connectError.message);
@@ -1187,7 +1297,7 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
     setMessage("");
     setError("");
     setStatus("signing-in");
-    await login("google", requestedEmail);
+    await login(mailProvider, requestedEmail);
   }
 
   function useHarnessAccount() {
@@ -1198,10 +1308,8 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
   const isBusy = status === "signing-in" || status === "connecting";
   const isConnected = status === "connected";
   const isFailed = status === "failed";
-  const visibleMessage = message || error || accountMismatchMessage;
-  const primaryActionText = hasWrongSignedInAccount
-    ? `Switch to ${requestedEmail}`
-    : user ? "Connect this Gmail" : "Continue to Google";
+  const visibleMessage = message || error;
+  const primaryActionText = user ? `Connect this ${mailClientLabel}` : `Continue with ${mailClientLabel}`;
 
   return (
     <main className="connect-page">
@@ -1209,25 +1317,25 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
         <div className="connect-brand-row">
           <div className="logo-mark">ST</div>
           <span />
-          <GoogleLogo />
+          <MailProviderLogo />
         </div>
-        <h1>{isConnected ? "Gmail connected" : isFailed ? "Connection needs attention" : "Connect Gmail"}</h1>
+        <h1>{isConnected ? `${mailClientLabel} connected` : isFailed ? "Connection needs attention" : `Connect ${mailClientLabel}`}</h1>
         <p className="connect-lede">
           {isConnected
-            ? `${connectedAccount?.email || requestedEmail} can now use Simple Track from Gmail without access keys.`
-            : `Connect ${requestedEmail || "this Gmail account"} to Simple Track so the extension can track only the right account.`}
+            ? `${connectedAccount?.email || requestedEmail} can now use Simple Track from ${mailClientLabel} without access keys.`
+            : `Connect ${requestedEmail || `this ${mailClientLabel} account`} to Simple Track so this extension install tracks the right mailbox.`}
         </p>
 
         <div className="permissions-card">
-          <PermissionItem icon={ShieldCheck} title="Permissions we need" text="Simple Track links this browser install to the Google account you choose." />
+          <PermissionItem icon={ShieldCheck} title="Permissions we need" text="Simple Track links this browser install to the mail account you are connecting." />
           <PermissionItem icon={Eye} title="No mailbox harvesting" text="The web app receives tracking metadata, not your full inbox or password." />
           <PermissionItem icon={Check} title="You are in control" text="Disconnect or change accounts from the app profile menu or extension settings." />
         </div>
 
         {user ? (
-          <div className={hasWrongSignedInAccount ? "signed-in-strip warning" : "signed-in-strip"}>
+          <div className="signed-in-strip">
             <UserRound size={18} />
-            <span>Signed in as <strong>{user.email}</strong></span>
+            <span>Signed in to Simple Track as <strong>{user.email}</strong></span>
           </div>
         ) : null}
 
@@ -1239,16 +1347,16 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
 
         <div className="connect-actions">
           {!isConnected ? (
-            <button type="button" onClick={continueWithGoogle} disabled={!authReady || isBusy}>
-              {isBusy ? <Loader2 className="spin" size={18} /> : <GoogleLogo />}
+            <button type="button" onClick={continueConnection} disabled={!authReady || isBusy}>
+              {isBusy ? <Loader2 className="spin" size={18} /> : <MailProviderLogo />}
               {primaryActionText}
             </button>
           ) : (
-            <a className="connect-done-button" href="https://mail.google.com/">Return to Gmail</a>
+            <a className="connect-done-button" href={returnUrl}>Return to {mailClientLabel}</a>
           )}
           {user && !isConnected ? (
             <button className="ghost-button" type="button" onClick={chooseAnotherAccount}>
-              Choose another Google account
+              Use a different Simple Track login
             </button>
           ) : null}
           {allowHarness && !user && !isConnected ? (
@@ -1288,6 +1396,7 @@ function readConnectionParams() {
     installSecret: get("installSecret"),
     accountEmail: get("accountEmail").toLowerCase(),
     client: get("client") || "Gmail",
+    provider: get("provider"),
     source: get("source")
   };
 }
@@ -1696,17 +1805,20 @@ function SettingsPage({ data, setData, getToken, bootstrap }) {
             <div className="pairing-panel">
               <div>
                 <h3>Chrome extension connection</h3>
-                <p>Open Gmail, click Enable in the Simple Track prompt, then sign in here. No install keys or pasted codes are required.</p>
+                <p>Open Gmail or Outlook, click Enable in the Simple Track prompt, then sign in here. No install keys or pasted codes are required.</p>
                 <div className="connected-account-list">
                   {connectedAccounts.length ? connectedAccounts.map((account) => (
                     <span key={account.email}>
                       <Check size={14} />
                       {account.email}
                     </span>
-                  )) : <em>No Gmail accounts connected yet</em>}
+                  )) : <em>No mail accounts connected yet</em>}
                 </div>
               </div>
-              <a className="settings-link-button" href="https://mail.google.com/" target="_blank" rel="noreferrer">Open Gmail</a>
+              <div className="settings-link-group">
+                <a className="settings-link-button" href="https://mail.google.com/" target="_blank" rel="noreferrer">Open Gmail</a>
+                <a className="settings-link-button" href="https://outlook.live.com/mail/" target="_blank" rel="noreferrer">Open Outlook</a>
+              </div>
             </div>
           </div>
         ) : null}

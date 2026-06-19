@@ -253,6 +253,13 @@ button:disabled {
   background: #eef4ff;
 }
 
+.option-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
 .secondary-action:hover {
   color: #ffffff;
   background: var(--blue);

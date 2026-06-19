@@ -5,7 +5,8 @@ const SIMPLE_TRACK_WEB_ORIGINS = new Set([
 
 const SIMPLE_TRACK_WEB_REQUESTS = new Set([
   "simpleTrack:createWebAppSession",
-  "simpleTrack:getConnectedAccounts"
+  "simpleTrack:getConnectedAccounts",
+  "simpleTrack:disconnectAccount"
 ]);
 
 window.addEventListener("message", (event) => {

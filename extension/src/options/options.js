@@ -17,6 +17,7 @@ const installIdValue = document.querySelector("#installIdValue");
 const pairingState = document.querySelector("#pairingState");
 const connectedAccounts = document.querySelector("#connectedAccounts");
 const openGmailButton = document.querySelector("#openGmailButton");
+const openOutlookButton = document.querySelector("#openOutlookButton");
 
 document.addEventListener("DOMContentLoaded", init);
 
@@ -42,7 +43,8 @@ async function init() {
     }
   });
 
-  openGmailButton.addEventListener("click", openGmail);
+openGmailButton.addEventListener("click", () => openMailClient("https://mail.google.com/mail/u/0/#inbox"));
+openOutlookButton.addEventListener("click", () => openMailClient("https://outlook.live.com/mail/"));
 }
 
 async function sendMessage(message) {
@@ -87,16 +89,16 @@ function fillPairing(response) {
     return;
   }
 
-  pairingState.textContent = "No Gmail accounts connected yet. Open Gmail and click Enable in the Simple Track prompt.";
+  pairingState.textContent = "No mail accounts connected yet. Open Gmail or Outlook and click Enable in the Simple Track prompt.";
 }
 
-function openGmail() {
+function openMailClient(url) {
   if (globalThis.chrome?.tabs?.create) {
-    chrome.tabs.create({ url: "https://mail.google.com/mail/u/0/#inbox", active: true });
+    chrome.tabs.create({ url, active: true });
     return;
   }
 
-  location.href = "https://mail.google.com/";
+  location.href = url;
 }
 
 function readForm() {

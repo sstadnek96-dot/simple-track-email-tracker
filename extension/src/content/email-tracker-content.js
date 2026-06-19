@@ -348,6 +348,8 @@
     }
 
     const existingAccounts = connectedAccounts.map((account) => account.email).filter(Boolean);
+    const clientName = getClientName();
+    const providerLogoUrl = getProviderLogoUrl(clientName);
     const prompt = document.createElement("div");
     prompt.className = "simple-track-account-overlay";
     prompt.dataset.mode = modal ? "blocking" : "notice";
@@ -360,8 +362,8 @@
     visual.innerHTML = `
       <div class="simple-track-account-logo">ST</div>
       <div class="simple-track-account-dots"><span></span><span></span><span></span></div>
-      <div class="simple-track-gmail-logo" aria-hidden="true">
-        <span></span><span></span><span></span><span></span>
+      <div class="simple-track-provider-logo" aria-hidden="true">
+        <img src="${providerLogoUrl}" alt="">
       </div>
     `;
 
@@ -370,13 +372,13 @@
 
     const title = document.createElement("h2");
     title.textContent = existingAccounts.length
-      ? `Switch accounts or enable tracking for ${activeAccountEmail}`
+      ? `Connect tracking for ${activeAccountEmail}`
       : `Enable email tracking for ${activeAccountEmail}`;
 
     const text = document.createElement("p");
     text.textContent = existingAccounts.length
-      ? `Simple Track is connected to ${existingAccounts.join(", ")}. Connect this Gmail account before tracking from it.`
-      : "Connect this Gmail account once. After that, tracking works without access keys.";
+      ? `Simple Track is already connected to ${existingAccounts.join(", ")}. Connect this ${clientName} account to add it to the same workspace.`
+      : `Connect this ${clientName} account once. After that, tracking works without access keys.`;
 
     const actions = document.createElement("div");
     actions.className = "simple-track-account-actions";
@@ -1538,6 +1540,11 @@
 
   function getClientName() {
     return isOutlook() ? "Outlook" : "Gmail";
+  }
+
+  function getProviderLogoUrl(clientName) {
+    const provider = String(clientName || "").toLowerCase().includes("outlook") ? "outlook" : "gmail";
+    return chrome.runtime.getURL(`assets/provider/${provider}.svg`);
   }
 
   function isMailClientPage() {

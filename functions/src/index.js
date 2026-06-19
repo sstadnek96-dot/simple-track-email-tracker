@@ -152,7 +152,7 @@ async function createTrackedMessage(req, res) {
   }
 
   if (accountEmail && hasConnectedAccounts(linkedInstall) && !connectedAccount) {
-    res.status(403).json({ ok: false, error: "This Gmail account is not connected to Simple Track yet" });
+    res.status(403).json({ ok: false, error: "This mail account is not connected to Simple Track yet" });
     return;
   }
 
@@ -583,22 +583,12 @@ async function connectExtensionAccount(context, req, res) {
   const accountEmail = normalizeEmail(body.accountEmail);
   const provider = cleanString(body.provider, 40) || "google";
   const client = cleanString(body.client, 80) || "Gmail";
-  const accountDisplayName = cleanString(body.accountDisplayName, 160) || context.user.displayName || accountEmail;
-  const accountPhotoURL = cleanString(body.accountPhotoURL || body.accountPhotoUrl || context.user.photoURL, 1000);
+  const userMatchesMailAccount = normalizeEmail(context.user.email) === accountEmail;
+  const accountDisplayName = cleanString(body.accountDisplayName, 160) || (userMatchesMailAccount ? context.user.displayName : "") || accountEmail;
+  const accountPhotoURL = cleanString(body.accountPhotoURL || body.accountPhotoUrl || (userMatchesMailAccount ? context.user.photoURL : ""), 1000);
 
   if (!installId || !installSecret || !accountEmail) {
     res.status(400).json({ ok: false, error: "Install ID, install secret, and account email are required" });
-    return;
-  }
-
-  if (normalizeEmail(context.user.email) !== accountEmail) {
-    res.status(409).json({
-      ok: false,
-      code: "account_mismatch",
-      error: `Sign in with ${accountEmail} to connect this Gmail account.`,
-      signedInEmail: context.user.email,
-      requestedEmail: accountEmail
-    });
     return;
   }
 
