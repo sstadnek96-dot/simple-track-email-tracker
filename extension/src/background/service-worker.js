@@ -466,8 +466,14 @@ async function getConnectedAccounts() {
 
 async function getKnownAccounts() {
   await ensureSeedData();
-  const result = await chrome.storage.local.get(STORAGE_KEYS.knownAccounts);
-  return normalizeConnectedAccounts(result[STORAGE_KEYS.knownAccounts]);
+  const result = await chrome.storage.local.get([STORAGE_KEYS.knownAccounts, STORAGE_KEYS.messages]);
+  const storedAccounts = normalizeConnectedAccounts(result[STORAGE_KEYS.knownAccounts]);
+  const messageAccounts = Array.isArray(result[STORAGE_KEYS.messages])
+    ? result[STORAGE_KEYS.messages]
+        .map((message) => accountFromMessage(message))
+        .filter(Boolean)
+    : [];
+  return mergeAccountLists(storedAccounts, messageAccounts);
 }
 
 async function getActiveAccountEmail() {
@@ -485,6 +491,12 @@ async function setConnectedAccounts(accounts, activeAccountEmail = "") {
     [STORAGE_KEYS.activeAccountEmail]: activeEmail
   });
   return { connectedAccounts, knownAccounts, activeAccountEmail: activeEmail };
+}
+
+async function rememberKnownAccounts(accounts) {
+  const knownAccounts = mergeAccountLists(await getKnownAccounts(), accounts);
+  await chrome.storage.local.set({ [STORAGE_KEYS.knownAccounts]: knownAccounts });
+  return knownAccounts;
 }
 
 function getAccountStatus(accountEmail, connectedAccounts, knownAccounts = []) {
@@ -513,6 +525,20 @@ function getAccountStatus(accountEmail, connectedAccounts, knownAccounts = []) {
 
 function mergeAccountLists(...accountLists) {
   return normalizeConnectedAccounts(accountLists.flat());
+}
+
+function accountFromMessage(message) {
+  const email = normalizeEmail(message?.accountEmail);
+  if (!email) return null;
+  const client = String(message?.client || "");
+  const provider = getProviderForClient(client || email);
+  return {
+    email,
+    displayName: email,
+    provider,
+    client: client || (provider === "microsoft" ? "Outlook" : "Gmail"),
+    status: "known"
+  };
 }
 
 function normalizeConnectedAccounts(accounts) {
@@ -578,12 +604,16 @@ async function startAccountConnection(message) {
   const accountEmail = normalizeEmail(message.accountEmail);
   const client = String(message.client || "Gmail");
   const returnUrl = sanitizeMailReturnUrl(message.returnUrl || "");
+  const knownAccounts = await getKnownAccounts();
+  const connectedAccounts = await getConnectedAccounts();
+  const accountStatus = getAccountStatus(accountEmail, connectedAccounts, knownAccounts);
+  const mode = accountStatus.status === "login_required" ? "reconnect" : "connect";
 
   if (!accountEmail) {
     return { ok: false, error: "Could not detect the active mail account." };
   }
 
-  const connectUrl = buildConnectUrl({ installId, installSecret, accountEmail, client, returnUrl });
+  const connectUrl = buildConnectUrl({ installId, installSecret, accountEmail, client, returnUrl, mode });
 
   if (globalThis.chrome?.tabs?.create) {
     await chrome.tabs.create({ url: connectUrl, active: true });
@@ -664,6 +694,7 @@ async function disconnectAccount(message = {}) {
   }
 
   if (settings.backendBaseUrl && installId && installSecret) {
+    await rememberKnownAccounts(currentAccounts);
     const response = await fetch(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/app/extension-disconnect`, {
       method: "POST",
       headers: getBackendHeaders(settings, installSecret),
@@ -676,39 +707,70 @@ async function disconnectAccount(message = {}) {
     }
 
     const saved = await setConnectedAccounts(body.connectedAccounts || [], body.activeAccountEmail || "");
+    notifyWebAppAccountDisconnected(accountEmail, saved).catch((error) => {
+      console.warn("Simple Track could not notify web app logout", error);
+    });
     return {
       ok: true,
       ...body,
       ...saved,
-      accountStatus: body.accountStatus || getAccountStatus(accountEmail, saved.connectedAccounts)
+      accountStatus: body.accountStatus || getAccountStatus(accountEmail, saved.connectedAccounts, saved.knownAccounts)
     };
   }
 
+  await rememberKnownAccounts(currentAccounts);
   const remainingAccounts = currentAccounts.filter((account) => account.email !== accountEmail);
   const requestedActiveEmail = currentActiveEmail === accountEmail ? "" : currentActiveEmail;
   const nextActiveEmail = remainingAccounts.some((account) => account.email === requestedActiveEmail)
     ? requestedActiveEmail
     : remainingAccounts[0]?.email || "";
   const saved = await setConnectedAccounts(remainingAccounts, nextActiveEmail);
+  notifyWebAppAccountDisconnected(accountEmail, saved).catch((error) => {
+    console.warn("Simple Track could not notify web app logout", error);
+  });
 
   return {
     ok: true,
     ...saved,
-    accountStatus: getAccountStatus(accountEmail, saved.connectedAccounts)
+    accountStatus: getAccountStatus(accountEmail, saved.connectedAccounts, saved.knownAccounts)
   };
 }
 
-function buildConnectUrl({ installId, installSecret, accountEmail, client, returnUrl = "" }) {
+function buildConnectUrl({ installId, installSecret, accountEmail, client, returnUrl = "", mode = "connect" }) {
   const params = new URLSearchParams({
     installId,
     installSecret,
     accountEmail,
     client,
     provider: getProviderForClient(client),
+    mode,
     source: "chrome-extension"
   });
   if (returnUrl) params.set("returnUrl", returnUrl);
-  return `${WEB_APP_URL}/connect-extension#${params.toString()}`;
+  const url = new URL(`${WEB_APP_URL}/connect-extension`);
+  url.searchParams.set("v", String(Date.now()));
+  url.hash = params.toString();
+  return url.toString();
+}
+
+async function notifyWebAppAccountDisconnected(accountEmail, state = {}) {
+  if (!globalThis.chrome?.tabs?.query || !globalThis.chrome?.tabs?.sendMessage) return;
+  const tabs = await chrome.tabs.query({
+    url: [
+      "https://simple-track-prod-app.web.app/*",
+      "https://simple-track-prod-app.firebaseapp.com/*"
+    ]
+  });
+  await Promise.all(tabs.map((tab) => (
+    tab.id
+      ? chrome.tabs.sendMessage(tab.id, {
+          type: "simpleTrack:accountDisconnected",
+          accountEmail,
+          connectedAccounts: state.connectedAccounts || [],
+          activeAccountEmail: state.activeAccountEmail || ""
+        }).catch(() => null)
+      : Promise.resolve(null)
+  )));
 }
 
 function sanitizeMailReturnUrl(value = "") {

@@ -11,6 +11,7 @@ const appUrl = "http://127.0.0.1:4173/?harness=1";
 const gmailReturnUrl = "https://mail.google.com/mail/u/3/#inbox";
 const outlookReturnUrl = "https://outlook.live.com/mail/0/inbox";
 const connectUrl = `http://127.0.0.1:4173/connect-extension?harness=1#installId=harness-install&installSecret=harness-secret&accountEmail=s.stadnek96@gmail.com&client=Gmail&source=chrome-extension&returnUrl=${encodeURIComponent(gmailReturnUrl)}`;
+const reconnectUrl = `http://127.0.0.1:4173/connect-extension?harness=1#installId=harness-install&installSecret=harness-secret&accountEmail=spencer.tpp@gmail.com&client=Gmail&mode=reconnect&source=chrome-extension&returnUrl=${encodeURIComponent(gmailReturnUrl)}`;
 const connectOutlookUrl = `http://127.0.0.1:4173/connect-extension?harness=1#installId=harness-install&installSecret=harness-secret&accountEmail=spencer.stadnek@outlook.com&client=Outlook&provider=microsoft&source=chrome-extension&returnUrl=${encodeURIComponent(outlookReturnUrl)}`;
 const apiBase = "https://us-central1-simple-track-prod.cloudfunctions.net/api";
 const extensionContext = Buffer.from(JSON.stringify({
@@ -400,6 +401,28 @@ async function runBrowserChecks() {
     await page.getByRole("button", { name: "Link clicks" }).last().click();
     await page.waitForSelector("h1:text('Link clicks')");
 
+    await page.evaluate(() => {
+      window.postMessage({
+        source: "simple-track-extension-event",
+        type: "simpleTrack:accountDisconnected",
+        accountEmail: "s.stadnek96@gmail.com",
+        connectedAccounts: [],
+        activeAccountEmail: ""
+      }, window.location.origin);
+    });
+    try {
+      await page.waitForSelector(".auth-modal", { timeout: 3000 });
+    } catch (error) {
+      const state = await page.evaluate(() => ({
+        hasAuthModal: Boolean(document.querySelector(".auth-modal")),
+        hasProfileButton: Boolean(document.querySelector(".profile-button")),
+        text: document.body.innerText.slice(0, 800),
+        storage: window.localStorage.getItem("simpleTrack.extensionSession"),
+        requests: window.__simpleTrackExternalRequests || []
+      }));
+      throw new Error(`extension logout sync did not show auth modal: ${JSON.stringify(state, null, 2)}`);
+    }
+
     await page.goto(appUrl);
     await page.evaluate(() => {
       window.localStorage.clear();
@@ -420,12 +443,20 @@ async function runBrowserChecks() {
       "Gmail connection should return to the exact Gmail account URL"
     );
 
+    await page.goto(reconnectUrl);
+    await page.waitForSelector("h1:text('Reconnect Gmail')");
+    assert.equal(await page.getByText("Signed in to Simple Track as").count(), 0, "reconnect page should not show confusing signed-in identity copy");
+    if (await page.getByRole("button", { name: /Use harness account/i }).count()) {
+      await page.getByRole("button", { name: /Use harness account/i }).click();
+    }
+    await page.getByRole("button", { name: /Reconnect Gmail|Log back in with Gmail/i }).click();
+    await page.waitForSelector("h1:text('Gmail connected')");
+
     await page.goto(connectOutlookUrl);
     await page.waitForSelector("h1:text('Connect Outlook')");
     if (await page.getByRole("button", { name: /Use harness account/i }).count()) {
       await page.getByRole("button", { name: /Use harness account/i }).click();
     }
-    await page.waitForSelector("text=Signed in to Simple Track as s.stadnek96@gmail.com");
     await page.getByRole("button", { name: /Connect this Outlook/i }).click();
     await page.waitForSelector("h1:text('Outlook connected')");
     await page.waitForSelector("text=spencer.stadnek@outlook.com can now use Simple Track from Outlook without access keys.");

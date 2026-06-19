@@ -21,7 +21,6 @@ import {
   ShieldCheck,
   Sparkles,
   Upload,
-  UserRound,
   Users,
   X
 } from "lucide-react";
@@ -111,6 +110,15 @@ function getHandoffToken(extensionContext, accountEmail = "") {
   return extensionContext?.handoffTokens?.[normalizedEmail] || "";
 }
 
+function extensionContextHasAccount(extensionContext, accountEmail = "") {
+  const normalizedEmail = normalizeAccountEmail(accountEmail);
+  if (!normalizedEmail) return false;
+  return Boolean(
+    getHandoffToken(extensionContext, normalizedEmail) ||
+    (extensionContext?.connectedAccounts || []).some((account) => normalizeAccountEmail(account.email) === normalizedEmail)
+  );
+}
+
 function hasExtensionContext(context) {
   return Boolean(
     context?.extensionId ||
@@ -180,9 +188,14 @@ function readStoredExtensionContext() {
 }
 
 function writeStoredExtensionContext(context) {
-  if (typeof window === "undefined" || !hasExtensionContext(context)) return;
+  if (typeof window === "undefined") return;
 
   try {
+    if (!hasExtensionContext(context)) {
+      window.localStorage.removeItem(EXTENSION_SESSION_CACHE_KEY);
+      return;
+    }
+
     window.localStorage.setItem(EXTENSION_SESSION_CACHE_KEY, JSON.stringify({
       ...context,
       handoffAccountEmail: "",
@@ -372,6 +385,49 @@ function App() {
   }, []);
 
   useEffect(() => {
+    function handleDisconnectedMessage(message = {}) {
+      const disconnectedEmail = normalizeAccountEmail(message.accountEmail);
+      if (!disconnectedEmail) return;
+
+      const remainingAccounts = replaceDisconnectedAccountState(
+        disconnectedEmail,
+        Array.isArray(message.connectedAccounts) ? message.connectedAccounts : null,
+        message.activeAccountEmail || ""
+      );
+      const nextEmail = normalizeAccountEmail(message.activeAccountEmail) || remainingAccounts[0]?.email || "";
+
+      if (!remainingAccounts.length) {
+        logout();
+        return;
+      }
+
+      if (normalizeAccountEmail(activeMailAccount) === disconnectedEmail) {
+        setActiveMailAccount(nextEmail);
+      }
+    }
+
+    function handleExtensionEvent(event) {
+      if (event.origin !== window.location.origin) return;
+      const message = event.data || {};
+      if (message.source !== "simple-track-extension-event" || message.type !== "simpleTrack:accountDisconnected") return;
+      handleDisconnectedMessage(message);
+    }
+
+    function handleExtensionCustomEvent(event) {
+      const message = event.detail || {};
+      if (message.type !== "simpleTrack:accountDisconnected") return;
+      handleDisconnectedMessage(message);
+    }
+
+    window.addEventListener("message", handleExtensionEvent);
+    window.addEventListener("simple-track-extension-event", handleExtensionCustomEvent);
+    return () => {
+      window.removeEventListener("message", handleExtensionEvent);
+      window.removeEventListener("simple-track-extension-event", handleExtensionCustomEvent);
+    };
+  }, [activeMailAccount, profileAccounts]);
+
+  useEffect(() => {
     if (!hasExtensionContext(routeParams.extensionContext)) return;
     setExtensionSessionContext((current) => {
       const next = mergeExtensionContexts(current, routeParams.extensionContext);
@@ -385,6 +441,7 @@ function App() {
     if (!hasExtensionContext(extensionSessionContext)) return;
     const requestedEmail = extensionSessionContext.handoffAccountEmail || routeParams.accountEmail;
     if (!requestedEmail) return;
+    if (!extensionContextHasAccount(extensionSessionContext, requestedEmail)) return;
     const loggedInEmail = normalizeAccountEmail(user?.email);
     if (requestedEmail && loggedInEmail === requestedEmail) return;
     signInToMailAccount(requestedEmail);
@@ -1237,6 +1294,7 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
   const MailProviderLogo = mailProvider === "microsoft" ? OutlookLogo : GmailLogo;
   const returnAccount = { email: requestedEmail, client: params.client, provider: params.provider };
   const returnUrl = getSafeMailReturnUrl(params.returnUrl, returnAccount) || getMailClientHomeUrl(returnAccount);
+  const isReconnect = params.mode === "reconnect";
   const signedInEmail = normalizeAccountEmail(user?.email);
   const accountMatchesWebLogin = Boolean(user && requestedEmail && signedInEmail === requestedEmail);
 
@@ -1322,7 +1380,9 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
   const isConnected = status === "connected";
   const isFailed = status === "failed";
   const visibleMessage = message || error;
-  const primaryActionText = user ? `Connect this ${mailClientLabel}` : `Continue with ${mailClientLabel}`;
+  const primaryActionText = user
+    ? isReconnect ? `Reconnect ${mailClientLabel}` : `Connect this ${mailClientLabel}`
+    : isReconnect ? `Log back in with ${mailClientLabel}` : `Continue with ${mailClientLabel}`;
 
   useEffect(() => {
     if (!isConnected || allowHarness || params.source !== "chrome-extension") return undefined;
@@ -1340,11 +1400,13 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
           <span />
           <MailProviderLogo />
         </div>
-        <h1>{isConnected ? `${mailClientLabel} connected` : isFailed ? "Connection needs attention" : `Connect ${mailClientLabel}`}</h1>
+        <h1>{isConnected ? `${mailClientLabel} connected` : isFailed ? "Connection needs attention" : isReconnect ? `Reconnect ${mailClientLabel}` : `Connect ${mailClientLabel}`}</h1>
         <p className="connect-lede">
           {isConnected
             ? `${connectedAccount?.email || requestedEmail} can now use Simple Track from ${mailClientLabel} without access keys.`
-            : `Connect ${requestedEmail || `this ${mailClientLabel} account`} to Simple Track so this extension install tracks the right mailbox.`}
+            : isReconnect
+              ? `Log back in to restore tracking for ${requestedEmail || `this ${mailClientLabel} account`} on this browser.`
+              : `Connect ${requestedEmail || `this ${mailClientLabel} account`} to Simple Track so this extension install tracks the right mailbox.`}
         </p>
 
         <div className="permissions-card">
@@ -1352,13 +1414,6 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
           <PermissionItem icon={Eye} title="No mailbox harvesting" text="The web app receives tracking metadata, not your full inbox or password." />
           <PermissionItem icon={Check} title="You are in control" text="Disconnect or change accounts from the app profile menu or extension settings." />
         </div>
-
-        {user ? (
-          <div className="signed-in-strip">
-            <UserRound size={18} />
-            <span>Signed in to Simple Track as <strong>{user.email}</strong></span>
-          </div>
-        ) : null}
 
         {visibleMessage ? (
           <div className={isConnected ? "success-banner" : "error-banner compact"}>
@@ -1418,6 +1473,7 @@ function readConnectionParams() {
     accountEmail: get("accountEmail").toLowerCase(),
     client: get("client") || "Gmail",
     provider: get("provider"),
+    mode: get("mode"),
     returnUrl: get("returnUrl"),
     source: get("source")
   };

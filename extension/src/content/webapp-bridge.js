@@ -25,3 +25,23 @@ window.addEventListener("message", (event) => {
     }, event.origin);
   });
 });
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== "simpleTrack:accountDisconnected") return false;
+
+  const eventDetail = {
+    type: "simpleTrack:accountDisconnected",
+    accountEmail: message.accountEmail || "",
+    connectedAccounts: message.connectedAccounts || [],
+    activeAccountEmail: message.activeAccountEmail || ""
+  };
+
+  window.postMessage({
+    source: "simple-track-extension-event",
+    ...eventDetail
+  }, window.location.origin);
+
+  window.dispatchEvent(new CustomEvent("simple-track-extension-event", { detail: eventDetail }));
+
+  return false;
+});

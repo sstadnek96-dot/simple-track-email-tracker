@@ -69,11 +69,11 @@ async function testKnownGmailAccountShowsLoginPrompt() {
 
   await page.waitForSelector(".simple-track-account-overlay");
   const promptText = await page.locator(".simple-track-account-overlay").innerText();
-  if (!promptText.includes("Log back in to Simple Track for spencer.tpp@gmail.com") || !promptText.includes("was connected before")) {
+  if (!promptText.includes("Log back in to enable email tracking for spencer.tpp@gmail.com") || !promptText.includes("was connected before")) {
     throw new Error(`Known account prompt showed the wrong copy:\n${promptText}`);
   }
-  if (await page.getByRole("button", { name: "Log in" }).count() !== 1) {
-    throw new Error("Known account prompt did not expose a Log in action");
+  if (await page.getByRole("button", { name: "Log back in" }).count() !== 1) {
+    throw new Error("Known account prompt did not expose a Log back in action");
   }
 
   await page.close();

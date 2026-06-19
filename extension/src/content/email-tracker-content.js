@@ -382,7 +382,7 @@
 
     const title = document.createElement("h2");
     title.textContent = isLoginRequired
-      ? `Log back in to Simple Track for ${activeAccountEmail}`
+      ? `Log back in to enable email tracking for ${activeAccountEmail}`
       : existingAccounts.length
       ? `Connect tracking for ${activeAccountEmail}`
       : `Enable email tracking for ${activeAccountEmail}`;
@@ -400,7 +400,7 @@
     const enable = document.createElement("button");
     enable.type = "button";
     enable.className = "simple-track-primary-action";
-    enable.textContent = isLoginRequired ? "Log in" : "Enable";
+    enable.textContent = isLoginRequired ? "Log back in" : "Enable";
 
     const cancel = document.createElement("button");
     cancel.type = "button";
