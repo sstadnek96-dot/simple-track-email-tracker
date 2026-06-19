@@ -42,6 +42,8 @@
     "https://outlook.live.com/*",
     "https://outlook.office.com/*",
     "https://outlook.office365.com/*",
+    "https://simple-track-prod-app.web.app/*",
+    "https://simple-track-prod-app.firebaseapp.com/*",
     "https://*.cloudfunctions.net/*",
     "https://*.run.app/*",
     "http://localhost/*",
@@ -62,6 +64,16 @@
         "src/content/email-tracker-content.js"
       ],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://simple-track-prod-app.web.app/*",
+        "https://simple-track-prod-app.firebaseapp.com/*"
+      ],
+      "js": [
+        "src/content/webapp-bridge.js"
+      ],
+      "run_at": "document_start"
     }
   ]
 }

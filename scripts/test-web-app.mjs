@@ -295,16 +295,16 @@ async function runBrowserChecks() {
     await page.locator(".profile-button").click();
     const profileMenu = page.locator(".profile-menu");
     await page.waitForSelector("text=spencer.tpp@gmail.com");
-    await page.waitForSelector("text=connected in this browser");
+    await page.waitForSelector("text=tracking connected");
     assert.equal(await profileMenu.getByText("All connected accounts").count(), 0, "profile menu should not show the combined accounts row");
     assert.equal(await profileMenu.getByText("Add another mail account").count(), 0, "profile menu should not show add-account shortcut");
     assert.equal(await profileMenu.getByText("Change app login").count(), 0, "profile menu should not show app-login shortcut");
     assert.equal(
-      await page.getByRole("button", { name: "Switch app login to spencer.tpp@gmail.com" }).count(),
+      await page.getByRole("button", { name: "Switch to spencer.tpp@gmail.com" }).count(),
       1,
       "extension-connected account should be switchable from the web app profile menu"
     );
-    await page.getByRole("button", { name: "Switch app login to spencer.tpp@gmail.com" }).click();
+    await page.getByRole("button", { name: "Switch to spencer.tpp@gmail.com" }).click();
     await page.waitForFunction(() => (
       window.__simpleTrackExternalRequests || []
     ).some((request) => request.accountEmail === "spencer.tpp@gmail.com"));

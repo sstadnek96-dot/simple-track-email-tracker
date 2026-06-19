@@ -50,7 +50,7 @@ const HOUR_LABELS = Array.from({ length: 24 }, (_, hour) => `${hour}:00`);
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const PROFILE_PHOTO_CACHE_KEY = "simpleTrack.profilePhotos";
 const EXTENSION_SESSION_CACHE_KEY = "simpleTrack.extensionSession";
-const EXTENSION_SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+const EXTENSION_BRIDGE_TIMEOUT_MS = 2200;
 
 function harnessAllowed() {
   const params = new URLSearchParams(window.location.search);
@@ -162,7 +162,7 @@ function readStoredExtensionContext() {
 
   try {
     const stored = JSON.parse(window.localStorage.getItem(EXTENSION_SESSION_CACHE_KEY) || "null");
-    if (!stored || Date.now() - Number(stored.savedAt || 0) > EXTENSION_SESSION_MAX_AGE_MS) return null;
+    if (!stored) return null;
     return {
       extensionId: String(stored.extensionId || ""),
       installId: String(stored.installId || ""),
@@ -368,6 +368,10 @@ function App() {
   }, [user]);
 
   useEffect(() => {
+    refreshExtensionAccountsFromBridge();
+  }, []);
+
+  useEffect(() => {
     if (!hasExtensionContext(routeParams.extensionContext)) return;
     setExtensionSessionContext((current) => {
       const next = mergeExtensionContexts(current, routeParams.extensionContext);
@@ -478,35 +482,103 @@ function App() {
       await signInFromExtensionHandoff(session.customToken, normalizedEmail);
       return;
     }
-
-    setError(`Simple Track could not get a fresh session for ${normalizedEmail}. Reload the extension, then open the web app from the extension again.`);
   }
 
   function requestExtensionWebAppSession(accountEmail = "") {
     const normalizedEmail = normalizeAccountEmail(accountEmail);
+    if (!normalizedEmail) return Promise.resolve(null);
+    const payload = {
+      type: "simpleTrack:createWebAppSession",
+      accountEmail: normalizedEmail
+    };
+
+    return firstSuccessfulExtensionResponse([
+      requestExtensionBridge("simpleTrack:createWebAppSession", payload),
+      requestExtensionExternal(payload)
+    ]);
+  }
+
+  function requestExtensionExternal(payload) {
     const extensionId = extensionSessionContext?.extensionId;
     const runtime = window.chrome?.runtime;
 
-    if (!normalizedEmail || !extensionId || !runtime?.sendMessage) {
-      return Promise.resolve(null);
-    }
+    if (!extensionId || !runtime?.sendMessage) return Promise.resolve(null);
 
     return new Promise((resolve) => {
       try {
-        runtime.sendMessage(extensionId, {
-          type: "simpleTrack:createWebAppSession",
-          accountEmail: normalizedEmail
-        }, (response) => {
+        runtime.sendMessage(extensionId, payload, (response) => {
           const lastError = runtime.lastError?.message;
-          if (lastError || !response?.ok) {
-            resolve(null);
-            return;
-          }
-          resolve(response);
+          resolve(lastError || !response?.ok ? null : response);
         });
       } catch {
         resolve(null);
       }
+    });
+  }
+
+  function firstSuccessfulExtensionResponse(promises) {
+    return new Promise((resolve) => {
+      let pending = promises.length;
+      let settled = false;
+
+      for (const promise of promises) {
+        Promise.resolve(promise).then((response) => {
+          if (settled) return;
+          if (response?.ok) {
+            settled = true;
+            resolve(response);
+            return;
+          }
+          pending -= 1;
+          if (pending === 0) resolve(null);
+        }).catch(() => {
+          pending -= 1;
+          if (!settled && pending === 0) resolve(null);
+        });
+      }
+    });
+  }
+
+  async function refreshExtensionAccountsFromBridge() {
+    const response = await requestExtensionBridge("simpleTrack:getConnectedAccounts", {
+      type: "simpleTrack:getConnectedAccounts"
+    });
+
+    if (!response?.ok) return;
+
+    rememberExtensionSession({
+      extensionId: response.extensionId || "",
+      activeAccountEmail: response.activeAccountEmail || "",
+      connectedAccounts: response.connectedAccounts || []
+    });
+  }
+
+  function requestExtensionBridge(type, payload) {
+    if (typeof window === "undefined") return Promise.resolve(null);
+
+    return new Promise((resolve) => {
+      const requestId = `st-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const timeout = window.setTimeout(() => {
+        window.removeEventListener("message", handleMessage);
+        resolve(null);
+      }, EXTENSION_BRIDGE_TIMEOUT_MS);
+
+      function handleMessage(event) {
+        if (event.source !== window || event.origin !== window.location.origin) return;
+        const message = event.data || {};
+        if (message.source !== "simple-track-extension" || message.requestId !== requestId) return;
+        window.clearTimeout(timeout);
+        window.removeEventListener("message", handleMessage);
+        resolve(message.response || null);
+      }
+
+      window.addEventListener("message", handleMessage);
+      window.postMessage({
+        source: "simple-track-web-app",
+        requestId,
+        type,
+        payload
+      }, window.location.origin);
     });
   }
 
@@ -557,8 +629,6 @@ function App() {
       signInToMailAccount(normalizedEmail);
       return;
     }
-
-    setError("Open Simple Track from the Chrome extension to switch connected mail accounts without another Google login.");
   }
 
   if (isConnectPage) {
@@ -874,7 +944,6 @@ function ProfileMenu({
           </span>
         </button>
       </div>
-      <p className="account-popout-note">Only mail accounts connected to this Simple Track session appear here.</p>
     </div>
   );
 }
@@ -887,8 +956,8 @@ function MailAccountRow({ account, active, onSwitchAccount, onChangeLogin }) {
     ? active ? "Active" : "Switch"
     : browserConnected || needsLoginSwitch ? "Switch" : "Connect";
   const secondaryText = browserConnected
-    ? `${account.email} - connected in this browser`
-    : needsLoginSwitch ? `${account.email} - switch web app account` : account.email;
+    ? `${account.email} - tracking connected`
+    : needsLoginSwitch ? `${account.email} - tracking connected` : account.email;
 
   return (
     <button
@@ -908,7 +977,7 @@ function MailAccountRow({ account, active, onSwitchAccount, onChangeLogin }) {
         }
         onChangeLogin(account.email);
       }}
-      aria-label={connected ? `Switch to ${account.email}` : browserConnected || needsLoginSwitch ? `Switch app login to ${account.email}` : `Connect ${account.email}`}
+      aria-label={connected || browserConnected || needsLoginSwitch ? `Switch to ${account.email}` : `Connect ${account.email}`}
     >
       <AccountAvatar account={account} />
       <span className="mail-account-copy">
