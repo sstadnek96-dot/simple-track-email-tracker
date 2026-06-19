@@ -17,6 +17,12 @@
   "background": {
     "service_worker": "src/background/service-worker.js"
   },
+  "externally_connectable": {
+    "matches": [
+      "https://simple-track-prod-app.web.app/*",
+      "https://simple-track-prod-app.firebaseapp.com/*"
+    ]
+  },
   "icons": {
     "16": "assets/icons/icon-16.png",
     "32": "assets/icons/icon-32.png",

@@ -689,6 +689,7 @@ function buildWebAppContext(activeAccountEmail = "") {
   if (!connectedAccounts.length && !currentState.installId) return null;
 
   return {
+    extensionId: globalThis.chrome?.runtime?.id || "",
     installId: currentState.installId || "",
     activeAccountEmail: normalizeEmail(activeAccountEmail || currentState.activeAccountEmail),
     connectedAccounts

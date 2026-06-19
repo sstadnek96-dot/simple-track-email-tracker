@@ -12,12 +12,12 @@ const connectUrl = "http://127.0.0.1:4173/connect-extension?harness=1#installId=
 const connectMismatchUrl = "http://127.0.0.1:4173/connect-extension?harness=1&mismatch=1#installId=harness-install&installSecret=harness-secret&accountEmail=spencer.tpp@gmail.com&client=Gmail";
 const apiBase = "https://us-central1-simple-track-prod.cloudfunctions.net/api";
 const extensionContext = Buffer.from(JSON.stringify({
+  extensionId: "harness-extension",
   installId: "harness-install",
   activeAccountEmail: "s.stadnek96@gmail.com",
   handoffAccountEmail: "s.stadnek96@gmail.com",
   handoffTokens: {
-    "s.stadnek96@gmail.com": "harness-token-s",
-    "spencer.tpp@gmail.com": "harness-token-tpp"
+    "s.stadnek96@gmail.com": "harness-token-s"
   },
   connectedAccounts: [
     {
@@ -112,6 +112,45 @@ async function runBrowserChecks() {
   const context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   const browserErrors = [];
+
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "chrome", {
+      configurable: true,
+      value: {
+        runtime: {
+          lastError: null,
+          sendMessage(extensionId, message, callback) {
+            window.__simpleTrackExternalRequests = window.__simpleTrackExternalRequests || [];
+            window.__simpleTrackExternalRequests.push({ extensionId, accountEmail: message?.accountEmail || "" });
+            setTimeout(() => {
+              callback({
+                ok: true,
+                customToken: `harness-token-${message.accountEmail}`,
+                accountEmail: message.accountEmail,
+                activeAccountEmail: message.accountEmail,
+                connectedAccounts: [
+                  {
+                    email: "s.stadnek96@gmail.com",
+                    displayName: "Spencer Davidson",
+                    provider: "google",
+                    client: "Gmail",
+                    status: "connected"
+                  },
+                  {
+                    email: "spencer.tpp@gmail.com",
+                    displayName: "Spencer Stadnek",
+                    provider: "google",
+                    client: "Gmail",
+                    status: "connected"
+                  }
+                ]
+              });
+            }, 0);
+          }
+        }
+      }
+    });
+  });
 
   page.on("console", (message) => {
     if (message.type() === "error") browserErrors.push(`console: ${message.text()}`);
@@ -248,8 +287,11 @@ async function runBrowserChecks() {
     await page.waitForSelector("text=Question About Lawncare");
 
     await page.goto(`${appUrl}&page=activity&accountEmail=s.stadnek96@gmail.com#stContext=${extensionContext}`);
-    await page.waitForSelector(".auth-modal");
-    await page.getByRole("button", { name: /Use harness account/i }).click();
+    await page.waitForSelector(".profile-button, .auth-modal");
+    if (await page.locator(".auth-modal").count()) {
+      await page.getByRole("button", { name: /Use harness account/i }).click();
+    }
+    await page.waitForSelector(".profile-button");
     await page.locator(".profile-button").click();
     const profileMenu = page.locator(".profile-menu");
     await page.waitForSelector("text=spencer.tpp@gmail.com");
@@ -262,7 +304,17 @@ async function runBrowserChecks() {
       1,
       "extension-connected account should be switchable from the web app profile menu"
     );
-    await page.getByLabel("Close account menu").click();
+    await page.getByRole("button", { name: "Switch app login to spencer.tpp@gmail.com" }).click();
+    await page.waitForFunction(() => (
+      window.__simpleTrackExternalRequests || []
+    ).some((request) => request.accountEmail === "spencer.tpp@gmail.com"));
+    assert.equal(
+      await page.getByText("Open Simple Track from the Chrome extension").count(),
+      0,
+      "switching an extension-connected account should not show the no-handoff error"
+    );
+    await page.locator(".profile-button").click();
+    await page.getByRole("button", { name: "Switch to s.stadnek96@gmail.com" }).click();
 
     await page.getByRole("button", { name: "Email tracking" }).first().click();
     await page.waitForSelector("h1:text('Email tracking')");
@@ -300,15 +352,26 @@ async function runBrowserChecks() {
     await page.getByRole("button", { name: "Link clicks" }).last().click();
     await page.waitForSelector("h1:text('Link clicks')");
 
+    await page.goto(appUrl);
+    await page.evaluate(() => {
+      window.localStorage.clear();
+      window.sessionStorage.clear();
+    });
     await page.goto(connectUrl);
     await page.waitForSelector("h1:text('Connect Gmail')");
-    await page.getByRole("button", { name: /Use harness account/i }).click();
+    if (await page.getByRole("button", { name: /Use harness account/i }).count()) {
+      await page.getByRole("button", { name: /Use harness account/i }).click();
+    } else {
+      await page.getByRole("button", { name: /Connect this Gmail|Continue to Google/i }).click();
+    }
     await page.waitForSelector("h1:text('Gmail connected')");
     await page.waitForSelector("text=without access keys");
 
     await page.goto(connectMismatchUrl);
     await page.waitForSelector("h1:text('Connect Gmail')");
-    await page.getByRole("button", { name: /Use harness account/i }).click();
+    if (await page.getByRole("button", { name: /Use harness account/i }).count()) {
+      await page.getByRole("button", { name: /Use harness account/i }).click();
+    }
     await page.waitForSelector("text=Signed in as s.stadnek96@gmail.com");
     await page.waitForSelector("text=Switch to spencer.tpp@gmail.com");
     assert.equal(await page.getByText("Gmail connected").count(), 0, "wrong signed-in account must not connect the requested Gmail");

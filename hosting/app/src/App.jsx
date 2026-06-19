@@ -49,6 +49,8 @@ const NAV = [
 const HOUR_LABELS = Array.from({ length: 24 }, (_, hour) => `${hour}:00`);
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const PROFILE_PHOTO_CACHE_KEY = "simpleTrack.profilePhotos";
+const EXTENSION_SESSION_CACHE_KEY = "simpleTrack.extensionSession";
+const EXTENSION_SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 function harnessAllowed() {
   const params = new URLSearchParams(window.location.search);
@@ -76,6 +78,7 @@ function readExtensionContext(searchParams, hashParams) {
     : [];
 
   return {
+    extensionId: String(context?.extensionId || ""),
     installId: String(context?.installId || ""),
     activeAccountEmail: normalizeAccountEmail(context?.activeAccountEmail),
     handoffAccountEmail: normalizeAccountEmail(context?.handoffAccountEmail),
@@ -106,6 +109,90 @@ function getHandoffToken(extensionContext, accountEmail = "") {
   const normalizedEmail = normalizeAccountEmail(accountEmail);
   if (!normalizedEmail) return "";
   return extensionContext?.handoffTokens?.[normalizedEmail] || "";
+}
+
+function hasExtensionContext(context) {
+  return Boolean(
+    context?.extensionId ||
+    context?.installId ||
+    Object.keys(context?.handoffTokens || {}).length ||
+    context?.connectedAccounts?.length
+  );
+}
+
+function mergeExtensionContexts(...contexts) {
+  const merged = {
+    extensionId: "",
+    installId: "",
+    activeAccountEmail: "",
+    handoffAccountEmail: "",
+    handoffToken: "",
+    handoffTokens: {},
+    connectedAccounts: []
+  };
+  const byEmail = new Map();
+
+  for (const context of contexts) {
+    if (!context) continue;
+    merged.extensionId = context.extensionId || merged.extensionId;
+    merged.installId = context.installId || merged.installId;
+    merged.activeAccountEmail = context.activeAccountEmail || merged.activeAccountEmail;
+    merged.handoffAccountEmail = context.handoffAccountEmail || merged.handoffAccountEmail;
+    merged.handoffToken = context.handoffToken || merged.handoffToken;
+    merged.handoffTokens = { ...merged.handoffTokens, ...(context.handoffTokens || {}) };
+
+    for (const account of context.connectedAccounts || []) {
+      const normalized = normalizeAccountRecord(account);
+      if (!normalized) continue;
+      const existing = byEmail.get(normalized.email);
+      byEmail.set(normalized.email, {
+        ...existing,
+        ...normalized,
+        photoURL: existing?.photoURL || normalized.photoURL
+      });
+    }
+  }
+
+  merged.connectedAccounts = [...byEmail.values()];
+  return merged;
+}
+
+function readStoredExtensionContext() {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(EXTENSION_SESSION_CACHE_KEY) || "null");
+    if (!stored || Date.now() - Number(stored.savedAt || 0) > EXTENSION_SESSION_MAX_AGE_MS) return null;
+    return {
+      extensionId: String(stored.extensionId || ""),
+      installId: String(stored.installId || ""),
+      activeAccountEmail: normalizeAccountEmail(stored.activeAccountEmail),
+      handoffAccountEmail: normalizeAccountEmail(stored.handoffAccountEmail),
+      handoffToken: String(stored.handoffToken || ""),
+      handoffTokens: normalizeHandoffTokens(stored),
+      connectedAccounts: Array.isArray(stored.connectedAccounts)
+        ? stored.connectedAccounts.map(normalizeAccountRecord).filter(Boolean)
+        : []
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredExtensionContext(context) {
+  if (typeof window === "undefined" || !hasExtensionContext(context)) return;
+
+  try {
+    window.localStorage.setItem(EXTENSION_SESSION_CACHE_KEY, JSON.stringify({
+      ...context,
+      handoffAccountEmail: "",
+      handoffToken: "",
+      handoffTokens: {},
+      savedAt: Date.now()
+    }));
+  } catch {
+    // Switching still works from the current URL context if local storage is unavailable.
+  }
 }
 
 function decodeRouteContext(encoded) {
@@ -247,14 +334,17 @@ function App() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [extensionSessionContext, setExtensionSessionContext] = useState(() => (
+    mergeExtensionContexts(readStoredExtensionContext(), routeParams.extensionContext)
+  ));
   const allowHarness = harnessAllowed();
   const isConnectPage = window.location.pathname === "/connect-extension";
   const profileAccounts = useMemo(
     () => mergeProfileAccounts(
       data?.connectedAccounts || bootstrap?.connectedAccounts || [],
-      routeParams.extensionContext?.connectedAccounts || []
+      extensionSessionContext?.connectedAccounts || []
     ),
-    [data?.connectedAccounts, bootstrap?.connectedAccounts, routeParams.extensionContext]
+    [data?.connectedAccounts, bootstrap?.connectedAccounts, extensionSessionContext]
   );
   const enrichedProfileAccounts = useMemo(
     () => enrichProfileAccounts(profileAccounts, user),
@@ -278,14 +368,23 @@ function App() {
   }, [user]);
 
   useEffect(() => {
+    if (!hasExtensionContext(routeParams.extensionContext)) return;
+    setExtensionSessionContext((current) => {
+      const next = mergeExtensionContexts(current, routeParams.extensionContext);
+      writeStoredExtensionContext(next);
+      return next;
+    });
+  }, [routeParams.extensionContext]);
+
+  useEffect(() => {
     if (!authReady) return;
-    const requestedEmail = routeParams.extensionContext.handoffAccountEmail || routeParams.accountEmail;
-    const handoffToken = getHandoffToken(routeParams.extensionContext, requestedEmail);
-    if (!handoffToken) return;
+    if (!hasExtensionContext(extensionSessionContext)) return;
+    const requestedEmail = extensionSessionContext.handoffAccountEmail || routeParams.accountEmail;
+    if (!requestedEmail) return;
     const loggedInEmail = normalizeAccountEmail(user?.email);
     if (requestedEmail && loggedInEmail === requestedEmail) return;
-    signInFromExtensionHandoff(handoffToken, requestedEmail);
-  }, [authReady, routeParams.extensionContext, user?.email]);
+    signInToMailAccount(requestedEmail);
+  }, [authReady, extensionSessionContext, routeParams.accountEmail, user?.email]);
 
   async function getToken() {
     return user?.getIdToken ? user.getIdToken() : "";
@@ -337,12 +436,86 @@ function App() {
   async function signInFromExtensionHandoff(customToken, accountEmail = "") {
     setError("");
     try {
+      if (allowHarness && String(customToken).startsWith("harness-token")) {
+        const normalizedEmail = normalizeAccountEmail(accountEmail);
+        setUser({
+          ...createHarnessUser(),
+          email: normalizedEmail || "s.stadnek96@gmail.com",
+          displayName: normalizedEmail === "spencer.tpp@gmail.com" ? "Spencer Stadnek" : "Spencer Davidson"
+        });
+        setBootstrap(mockBootstrap);
+        setData(mockDashboard);
+        if (normalizedEmail) setActiveMailAccount(normalizedEmail);
+        return;
+      }
+
       const result = await signInWithCustomToken(auth, customToken);
       setUser(toUser(result.user));
       if (accountEmail) setActiveMailAccount(normalizeAccountEmail(accountEmail));
     } catch (sessionError) {
       setError(`Could not open ${accountEmail || "that account"} automatically. ${sessionError.message}`);
     }
+  }
+
+  async function signInToMailAccount(accountEmail = "") {
+    const normalizedEmail = normalizeAccountEmail(accountEmail);
+    if (!normalizedEmail) return;
+
+    const existingToken = getHandoffToken(extensionSessionContext, normalizedEmail);
+    if (existingToken) {
+      await signInFromExtensionHandoff(existingToken, normalizedEmail);
+      return;
+    }
+
+    const session = await requestExtensionWebAppSession(normalizedEmail);
+    if (session?.customToken) {
+      rememberExtensionSession({
+        handoffAccountEmail: normalizedEmail,
+        handoffToken: session.customToken,
+        handoffTokens: { [normalizedEmail]: session.customToken },
+        connectedAccounts: session.connectedAccounts || []
+      });
+      await signInFromExtensionHandoff(session.customToken, normalizedEmail);
+      return;
+    }
+
+    setError(`Simple Track could not get a fresh session for ${normalizedEmail}. Reload the extension, then open the web app from the extension again.`);
+  }
+
+  function requestExtensionWebAppSession(accountEmail = "") {
+    const normalizedEmail = normalizeAccountEmail(accountEmail);
+    const extensionId = extensionSessionContext?.extensionId;
+    const runtime = window.chrome?.runtime;
+
+    if (!normalizedEmail || !extensionId || !runtime?.sendMessage) {
+      return Promise.resolve(null);
+    }
+
+    return new Promise((resolve) => {
+      try {
+        runtime.sendMessage(extensionId, {
+          type: "simpleTrack:createWebAppSession",
+          accountEmail: normalizedEmail
+        }, (response) => {
+          const lastError = runtime.lastError?.message;
+          if (lastError || !response?.ok) {
+            resolve(null);
+            return;
+          }
+          resolve(response);
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  function rememberExtensionSession(partialContext) {
+    setExtensionSessionContext((current) => {
+      const next = mergeExtensionContexts(current, partialContext);
+      writeStoredExtensionContext(next);
+      return next;
+    });
   }
 
   function loginHarness() {
@@ -378,18 +551,10 @@ function App() {
   function changeAppLogin(accountEmail = "") {
     setProfileOpen(false);
     const normalizedEmail = normalizeAccountEmail(accountEmail);
-    const matchingContextAccount = (routeParams.extensionContext?.connectedAccounts || [])
-      .find((account) => account.email === normalizedEmail);
-    const handoffToken = getHandoffToken(routeParams.extensionContext, normalizedEmail);
-
-    if (matchingContextAccount && handoffToken) {
-      signInFromExtensionHandoff(handoffToken, normalizedEmail);
-      return;
-    }
 
     if (normalizedEmail) {
-      setError(`Open Simple Track from the Chrome extension while viewing ${normalizedEmail} to switch that connected account without another Google login.`);
       setActiveMailAccount(normalizedEmail);
+      signInToMailAccount(normalizedEmail);
       return;
     }
 

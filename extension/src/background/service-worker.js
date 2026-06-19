@@ -16,6 +16,10 @@ const BACKEND_REFRESH_ALARM_MINUTES = 15;
 const SIMULATE_ACTIVITY_ALARM_MINUTES = 2;
 const CONNECTION_POLL_ATTEMPTS = 24;
 const CONNECTION_POLL_INTERVAL_MS = 2500;
+const EXTERNAL_MESSAGE_ORIGINS = new Set([
+  "https://simple-track-prod-app.web.app",
+  "https://simple-track-prod-app.firebaseapp.com"
+]);
 
 const DEFAULT_SETTINGS = {
   trackingEnabled: true,
@@ -124,6 +128,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
+if (chrome.runtime.onMessageExternal) {
+  chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+    handleExternalMessage(message, sender)
+      .then((response) => sendResponse(response))
+      .catch((error) => {
+        console.error("Simple Track external message failed", error);
+        sendResponse({ ok: false, error: error.message });
+      });
+
+    return true;
+  });
+}
+
 async function handleMessage(message) {
   if (!message || typeof message.type !== "string") {
     return { ok: false, error: "Invalid message" };
@@ -226,6 +243,41 @@ async function handleMessage(message) {
   }
 
   return { ok: false, error: `Unknown message type: ${message.type}` };
+}
+
+async function handleExternalMessage(message, sender = {}) {
+  if (!isAllowedExternalSender(sender)) {
+    return { ok: false, error: "Simple Track web app origin is not allowed." };
+  }
+
+  if (message?.type === "simpleTrack:createWebAppSession") {
+    return createWebAppSession(message);
+  }
+
+  if (message?.type === "simpleTrack:getConnectedAccounts") {
+    const connectedAccounts = await getConnectedAccounts();
+    return {
+      ok: true,
+      extensionId: chrome.runtime.id,
+      connectedAccounts,
+      activeAccountEmail: await getActiveAccountEmail()
+    };
+  }
+
+  return { ok: false, error: "Unsupported Simple Track web app request." };
+}
+
+function isAllowedExternalSender(sender = {}) {
+  const origin = sender.origin || safeOrigin(sender.url);
+  return EXTERNAL_MESSAGE_ORIGINS.has(origin);
+}
+
+function safeOrigin(url = "") {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "";
+  }
 }
 
 async function createTrackedMessage(message) {
