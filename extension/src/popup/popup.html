@@ -16,10 +16,22 @@
             <p>Gmail and Outlook tracking</p>
           </div>
         </div>
-        <button class="icon-button" id="openOptions" type="button" aria-label="Open settings" title="Settings">
+        <button class="icon-button" id="openOptions" type="button" aria-label="Open web app" title="Open web app">
           <span class="settings-icon" aria-hidden="true"></span>
         </button>
       </header>
+
+      <section class="account-panel" id="accountPanel" aria-live="polite">
+        <span class="account-avatar" id="accountAvatar">ST</span>
+        <div class="account-copy">
+          <strong id="accountEmail">Detecting mail account</strong>
+          <span id="accountStatus">Open Gmail or Outlook to connect tracking.</span>
+        </div>
+        <div class="account-actions">
+          <button class="account-action" id="connectAccount" type="button">Connect</button>
+          <button class="account-action secondary" id="disconnectAccount" type="button">Log out</button>
+        </div>
+      </section>
 
       <div class="toolbar">
         <label class="search-box">
@@ -91,7 +103,10 @@
               <dd class="location"></dd>
             </div>
           </dl>
-          <button class="mute-button" type="button"></button>
+          <div class="report-actions">
+            <button class="web-report-button" type="button">Open in web app</button>
+            <button class="mute-button" type="button"></button>
+          </div>
         </div>
       </details>
     </template>

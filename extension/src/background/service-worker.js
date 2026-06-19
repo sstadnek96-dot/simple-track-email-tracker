@@ -185,6 +185,14 @@ async function handleMessage(message) {
     return refreshAccountConnection(message);
   }
 
+  if (message.type === "simpleTrack:createWebAppSession") {
+    return createWebAppSession(message);
+  }
+
+  if (message.type === "simpleTrack:disconnectAccount") {
+    return disconnectAccount(message);
+  }
+
   if (message.type === "simpleTrack:createTrackedMessage") {
     return createTrackedMessage(message);
   }
@@ -437,6 +445,7 @@ function normalizeConnectedAccounts(accounts) {
     byEmail.set(email, {
       email,
       displayName: String(account.displayName || account.name || email),
+      photoURL: String(account.photoURL || account.photoUrl || ""),
       provider: String(account.provider || "google"),
       client: String(account.client || "Gmail"),
       connectedAt: account.connectedAt || new Date().toISOString(),
@@ -518,6 +527,70 @@ async function refreshAccountConnection(message = {}) {
 
   await setConnectedAccounts(status.connectedAccounts || [], status.activeAccountEmail || accountEmail);
   return { ok: true, ...status };
+}
+
+async function createWebAppSession(message = {}) {
+  const settings = await getSettings();
+  const installId = await getInstallId();
+  const installSecret = await getInstallSecret();
+  const accountEmail = normalizeEmail(message.accountEmail || (await getActiveAccountEmail()));
+  const connectedAccounts = await getConnectedAccounts();
+  const accountStatus = getAccountStatus(accountEmail, connectedAccounts);
+
+  if (!settings.backendBaseUrl) {
+    return { ok: false, error: "Tracking service is not configured." };
+  }
+
+  if (!installId || !installSecret || !accountEmail) {
+    return { ok: false, error: "A connected account is required to open the web app session." };
+  }
+
+  if (accountStatus.status !== "connected") {
+    return { ok: false, error: `${accountEmail} is not connected to this extension install.` };
+  }
+
+  const response = await fetch(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/app/extension-session`, {
+    method: "POST",
+    headers: getBackendHeaders(settings, installSecret),
+    body: JSON.stringify({ installId, accountEmail })
+  });
+  const body = await response.json().catch(() => null);
+
+  if (!response.ok || !body?.ok) {
+    throw new Error(body?.error || `Web app session failed (${response.status})`);
+  }
+
+  if (body.connectedAccounts) {
+    await setConnectedAccounts(body.connectedAccounts, body.activeAccountEmail || accountEmail);
+  }
+
+  return body;
+}
+
+async function disconnectAccount(message = {}) {
+  const accountEmail = normalizeEmail(message.accountEmail || (await getActiveAccountEmail()));
+  const currentAccounts = await getConnectedAccounts();
+  const currentActiveEmail = await getActiveAccountEmail();
+
+  if (!accountEmail) {
+    return {
+      ok: false,
+      error: "No mail account was selected to log out."
+    };
+  }
+
+  const remainingAccounts = currentAccounts.filter((account) => account.email !== accountEmail);
+  const requestedActiveEmail = currentActiveEmail === accountEmail ? "" : currentActiveEmail;
+  const nextActiveEmail = remainingAccounts.some((account) => account.email === requestedActiveEmail)
+    ? requestedActiveEmail
+    : remainingAccounts[0]?.email || "";
+  const saved = await setConnectedAccounts(remainingAccounts, nextActiveEmail);
+
+  return {
+    ok: true,
+    ...saved,
+    accountStatus: getAccountStatus(accountEmail, saved.connectedAccounts)
+  };
 }
 
 function buildConnectUrl({ installId, installSecret, accountEmail, client }) {
@@ -690,11 +763,17 @@ function notifyForNewOpens(previousMessages, nextMessages, settings) {
 }
 
 function createNotification(message) {
+  const iconUrl = chrome.runtime.getURL("assets/icons/icon-128.png");
   chrome.notifications.create(`simple-track-open-${message.id}-${message.opens}`, {
     type: "basic",
-    iconUrl: "assets/icons/icon-128.png",
+    iconUrl,
     title: "Email opened",
     message: message.subject
+  }, () => {
+    const error = chrome.runtime.lastError;
+    if (error) {
+      console.warn("Simple Track notification could not be displayed", error.message);
+    }
   });
 }
 

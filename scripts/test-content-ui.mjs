@@ -9,6 +9,7 @@ const browser = await chromium.launch({ headless: true });
 
 try {
   await testUnconnectedGmailAccountShowsEnablePrompt();
+  await testPopupCanDetectActiveMailAccount();
   await testDuplicateSubjectsMapToDistinctRows();
   await testBadgeDoesNotRegressFromStaleStorage();
   await testPendingMessagesDoNotBindToRows();
@@ -40,6 +41,24 @@ async function testUnconnectedGmailAccountShowsEnablePrompt() {
   await page.getByRole("button", { name: "Enable" }).click();
   await page.waitForFunction(() => window.__simpleTrackStartedConnection === "other.account@gmail.com");
   await page.waitForSelector(".simple-track-account-overlay", { state: "detached" });
+  await page.close();
+}
+
+async function testPopupCanDetectActiveMailAccount() {
+  const page = await openGmailFixture([], "", {
+    activeAccountEmail: "s.stadnek96@gmail.com",
+    connectedAccounts: [{ email: "s.stadnek96@gmail.com", displayName: "Spencer Stadnek", provider: "google", client: "Gmail" }]
+  });
+
+  const response = await page.evaluate(() => new Promise((resolve) => {
+    const listener = window.__simpleTrackRuntimeListeners?.[0];
+    listener({ type: "simpleTrack:detectAccount" }, {}, resolve);
+  }));
+
+  if (!response?.ok || response.accountEmail !== "s.stadnek96@gmail.com" || response.client !== "Gmail") {
+    throw new Error(`Popup account detection returned the wrong active account:\n${JSON.stringify(response, null, 2)}`);
+  }
+
   await page.close();
 }
 
@@ -186,9 +205,15 @@ async function openGmailFixture(messages, rowsHtml, options = {}) {
   await page.evaluate(({ mockMessages, options }) => {
     window.__simpleTrackMockMessages = mockMessages;
     window.__simpleTrackStorageListeners = [];
+    window.__simpleTrackRuntimeListeners = [];
     window.__simpleTrackStartedConnection = "";
     window.chrome = {
       runtime: {
+        onMessage: {
+          addListener(listener) {
+            window.__simpleTrackRuntimeListeners.push(listener);
+          }
+        },
         sendMessage: async (message) => {
           if (message.type === "simpleTrack:getState") {
             const accountEmail = options.activeAccountEmail || "";

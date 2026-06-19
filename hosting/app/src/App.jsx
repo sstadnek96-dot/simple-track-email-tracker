@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
+import { getAdditionalUserInfo, GoogleAuthProvider, onAuthStateChanged, signInWithCustomToken, signInWithPopup, signOut } from "firebase/auth";
 import {
   Activity,
   BarChart3,
@@ -16,6 +16,7 @@ import {
   Mail,
   Menu,
   MoreHorizontal,
+  Plus,
   Search,
   Settings,
   ShieldCheck,
@@ -48,10 +49,91 @@ const NAV = [
 
 const HOUR_LABELS = Array.from({ length: 24 }, (_, hour) => `${hour}:00`);
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const PROFILE_PHOTO_CACHE_KEY = "simpleTrack.profilePhotos";
 
 function harnessAllowed() {
   const params = new URLSearchParams(window.location.search);
   return params.has("harness") || ["localhost", "127.0.0.1"].includes(window.location.hostname);
+}
+
+function readAppRouteParams() {
+  const params = new URLSearchParams(window.location.search);
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const page = params.get("page") || hash.get("page");
+  const accountEmail = normalizeAccountEmail(params.get("accountEmail") || hash.get("accountEmail"));
+  return {
+    activePage: NAV.some((item) => item.id === page) ? page : "activity",
+    focusedMessageId: params.get("messageId") || hash.get("messageId") || "",
+    accountEmail,
+    extensionContext: readExtensionContext(params, hash)
+  };
+}
+
+function readExtensionContext(searchParams, hashParams) {
+  const encoded = hashParams.get("stContext") || searchParams.get("stContext") || "";
+  const context = decodeRouteContext(encoded);
+  const connectedAccounts = Array.isArray(context?.connectedAccounts)
+    ? context.connectedAccounts.map(normalizeAccountRecord).filter(Boolean)
+    : [];
+
+  return {
+    installId: String(context?.installId || ""),
+    activeAccountEmail: normalizeAccountEmail(context?.activeAccountEmail),
+    handoffAccountEmail: normalizeAccountEmail(context?.handoffAccountEmail),
+    handoffToken: String(context?.handoffToken || ""),
+    handoffTokens: normalizeHandoffTokens(context),
+    connectedAccounts
+  };
+}
+
+function normalizeHandoffTokens(context) {
+  const tokens = {};
+  const rawTokens = context?.handoffTokens && typeof context.handoffTokens === "object" ? context.handoffTokens : {};
+
+  for (const [email, token] of Object.entries(rawTokens)) {
+    const normalizedEmail = normalizeAccountEmail(email);
+    if (normalizedEmail && token) tokens[normalizedEmail] = String(token);
+  }
+
+  const legacyEmail = normalizeAccountEmail(context?.handoffAccountEmail);
+  if (legacyEmail && context?.handoffToken) {
+    tokens[legacyEmail] = String(context.handoffToken);
+  }
+
+  return tokens;
+}
+
+function getHandoffToken(extensionContext, accountEmail = "") {
+  const normalizedEmail = normalizeAccountEmail(accountEmail);
+  if (!normalizedEmail) return "";
+  return extensionContext?.handoffTokens?.[normalizedEmail] || "";
+}
+
+function decodeRouteContext(encoded) {
+  if (!encoded) return null;
+
+  try {
+    const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(encoded.length / 4) * 4, "=");
+    const binary = atob(base64);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeAccountRecord(account) {
+  const email = normalizeAccountEmail(account?.email);
+  if (!email) return null;
+
+  return {
+    email,
+    displayName: account.displayName || account.name || email,
+    photoURL: account.photoURL || account.photoUrl || "",
+    provider: account.provider || "google",
+    client: account.client || "Gmail",
+    status: account.status || "connected"
+  };
 }
 
 function getInitials(user) {
@@ -64,13 +146,83 @@ function getInitials(user) {
     .join("") || "ST";
 }
 
-function toUser(authUser) {
+function toUser(authUser, photoURLOverride = "") {
+  const email = normalizeAccountEmail(authUser.email);
   return {
     displayName: authUser.displayName || authUser.email || "Simple Track User",
     email: authUser.email || "",
-    photoURL: authUser.photoURL || "",
+    photoURL: photoURLOverride || getAuthUserPhotoURL(authUser) || getCachedProfilePhoto(email),
     getIdToken: () => authUser.getIdToken()
   };
+}
+
+function getAuthUserPhotoURL(authUser) {
+  return authUser?.photoURL ||
+    authUser?.providerData?.find((profile) => profile?.photoURL)?.photoURL ||
+    "";
+}
+
+async function getLoginProfilePhoto(result, providerName) {
+  const email = normalizeAccountEmail(result?.user?.email);
+  const additionalProfile = getAdditionalUserInfo(result)?.profile || {};
+  const candidates = [
+    getAuthUserPhotoURL(result?.user),
+    additionalProfile.picture,
+    additionalProfile.avatar_url
+  ].filter(Boolean);
+
+  if (candidates[0]) {
+    setCachedProfilePhoto(email, candidates[0]);
+    return candidates[0];
+  }
+
+  if (providerName === "google") {
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    const photoURL = await fetchGoogleProfilePhoto(credential?.accessToken);
+    if (photoURL) {
+      setCachedProfilePhoto(email, photoURL);
+      return photoURL;
+    }
+  }
+
+  return getCachedProfilePhoto(email);
+}
+
+async function fetchGoogleProfilePhoto(accessToken = "") {
+  if (!accessToken) return "";
+
+  try {
+    const response = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    if (!response.ok) return "";
+    const profile = await response.json();
+    return profile.picture || "";
+  } catch {
+    return "";
+  }
+}
+
+function getCachedProfilePhoto(email) {
+  if (!email || typeof window === "undefined") return "";
+
+  try {
+    const cache = JSON.parse(window.localStorage.getItem(PROFILE_PHOTO_CACHE_KEY) || "{}");
+    return cache[email] || "";
+  } catch {
+    return "";
+  }
+}
+
+function setCachedProfilePhoto(email, photoURL) {
+  if (!email || !photoURL || typeof window === "undefined") return;
+
+  try {
+    const cache = JSON.parse(window.localStorage.getItem(PROFILE_PHOTO_CACHE_KEY) || "{}");
+    window.localStorage.setItem(PROFILE_PHOTO_CACHE_KEY, JSON.stringify({ ...cache, [email]: photoURL }));
+  } catch {
+    // The avatar can still fall back to initials if local storage is unavailable.
+  }
 }
 
 function createHarnessUser() {
@@ -83,12 +235,14 @@ function createHarnessUser() {
 }
 
 function App() {
+  const [routeParams] = useState(() => readAppRouteParams());
   const [authReady, setAuthReady] = useState(false);
   const [user, setUser] = useState(null);
   const [bootstrap, setBootstrap] = useState(null);
   const [data, setData] = useState(null);
-  const [activePage, setActivePage] = useState("activity");
-  const [activeMailAccount, setActiveMailAccount] = useState("all");
+  const [activePage, setActivePage] = useState(routeParams.activePage);
+  const [activeMailAccount, setActiveMailAccount] = useState(routeParams.accountEmail || "all");
+  const [focusedMessageId, setFocusedMessageId] = useState(routeParams.focusedMessageId);
   const [query, setQuery] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -96,6 +250,17 @@ function App() {
   const [loading, setLoading] = useState(false);
   const allowHarness = harnessAllowed();
   const isConnectPage = window.location.pathname === "/connect-extension";
+  const profileAccounts = useMemo(
+    () => mergeProfileAccounts(
+      data?.connectedAccounts || bootstrap?.connectedAccounts || [],
+      routeParams.extensionContext?.connectedAccounts || []
+    ),
+    [data?.connectedAccounts, bootstrap?.connectedAccounts, routeParams.extensionContext]
+  );
+  const enrichedProfileAccounts = useMemo(
+    () => enrichProfileAccounts(profileAccounts, user),
+    [profileAccounts, user]
+  );
 
   useEffect(() => {
     return onAuthStateChanged(auth, (authUser) => {
@@ -108,6 +273,16 @@ function App() {
     if (!user) return;
     loadWorkspace();
   }, [user]);
+
+  useEffect(() => {
+    if (!authReady) return;
+    const requestedEmail = routeParams.extensionContext.handoffAccountEmail || routeParams.accountEmail;
+    const handoffToken = getHandoffToken(routeParams.extensionContext, requestedEmail);
+    if (!handoffToken) return;
+    const loggedInEmail = normalizeAccountEmail(user?.email);
+    if (requestedEmail && loggedInEmail === requestedEmail) return;
+    signInFromExtensionHandoff(handoffToken, requestedEmail);
+  }, [authReady, routeParams.extensionContext, user?.email]);
 
   async function getToken() {
     return user?.getIdToken ? user.getIdToken() : "";
@@ -123,13 +298,15 @@ function App() {
       ]);
       setBootstrap(boot);
       setData(dashboard.data);
-      const firstAccount = dashboard.data?.connectedAccounts?.[0]?.email || boot.connectedAccounts?.[0]?.email || "all";
+      const firstAccount = routeParams.accountEmail || dashboard.data?.connectedAccounts?.[0]?.email || boot.connectedAccounts?.[0]?.email || "all";
       setActiveMailAccount(firstAccount);
+      if (routeParams.focusedMessageId) setActivePage("email");
     } catch (loadError) {
       if (allowHarness) {
         setBootstrap(mockBootstrap);
         setData(mockDashboard);
-        setActiveMailAccount(mockDashboard.connectedAccounts?.[0]?.email || "all");
+        setActiveMailAccount(routeParams.accountEmail || mockDashboard.connectedAccounts?.[0]?.email || "all");
+        if (routeParams.focusedMessageId) setActivePage("email");
       } else {
         setError(loadError.message);
       }
@@ -138,14 +315,30 @@ function App() {
     }
   }
 
-  async function login(providerName) {
+  async function login(providerName, loginHint = "") {
     setError("");
     try {
       const provider = providerName === "microsoft" ? microsoftProvider : googleProvider;
+      provider.setCustomParameters({
+        prompt: "select_account",
+        ...(loginHint ? { login_hint: normalizeAccountEmail(loginHint) } : {})
+      });
       const result = await signInWithPopup(auth, provider);
-      setUser(toUser(result.user));
+      const photoURL = await getLoginProfilePhoto(result, providerName);
+      setUser(toUser(result.user, photoURL));
     } catch (loginError) {
       setError(loginError.message);
+    }
+  }
+
+  async function signInFromExtensionHandoff(customToken, accountEmail = "") {
+    setError("");
+    try {
+      const result = await signInWithCustomToken(auth, customToken);
+      setUser(toUser(result.user));
+      if (accountEmail) setActiveMailAccount(normalizeAccountEmail(accountEmail));
+    } catch (sessionError) {
+      setError(`Could not open ${accountEmail || "that account"} automatically. ${sessionError.message}`);
     }
   }
 
@@ -154,6 +347,11 @@ function App() {
     setUser(createHarnessUser());
     setBootstrap(mockBootstrap);
     setData(mockDashboard);
+    setActiveMailAccount(routeParams.accountEmail || mockDashboard.connectedAccounts?.[0]?.email || "all");
+    if (routeParams.focusedMessageId) {
+      setActivePage("email");
+      setFocusedMessageId(routeParams.focusedMessageId);
+    }
   }
 
   async function logout() {
@@ -162,6 +360,39 @@ function App() {
     setBootstrap(null);
     setData(null);
     if (auth.currentUser) await signOut(auth);
+  }
+
+  function openSettingsPage() {
+    setProfileOpen(false);
+    setActivePage("settings");
+  }
+
+  function switchMailAccount(accountEmail) {
+    setActiveMailAccount(accountEmail);
+    setProfileOpen(false);
+  }
+
+  function connectMailAccount(accountEmail = "") {
+    setProfileOpen(false);
+    const target = accountEmail
+      ? `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(accountEmail)}`
+      : "https://mail.google.com/";
+    window.open(target, "_blank", "noopener,noreferrer");
+  }
+
+  function changeAppLogin(accountEmail = "") {
+    setProfileOpen(false);
+    const normalizedEmail = normalizeAccountEmail(accountEmail);
+    const matchingContextAccount = (routeParams.extensionContext?.connectedAccounts || [])
+      .find((account) => account.email === normalizedEmail);
+    const handoffToken = getHandoffToken(routeParams.extensionContext, normalizedEmail);
+
+    if (matchingContextAccount && handoffToken) {
+      signInFromExtensionHandoff(handoffToken, normalizedEmail);
+      return;
+    }
+
+    login("google", accountEmail);
   }
 
   if (isConnectPage) {
@@ -190,6 +421,8 @@ function App() {
       setData={setData}
       getToken={getToken}
       bootstrap={bootstrap}
+      focusedMessageId={focusedMessageId}
+      setFocusedMessageId={setFocusedMessageId}
     />
   ) : null;
 
@@ -228,26 +461,21 @@ function App() {
             </button>
             <div className="profile-wrap">
               <button className="profile-button" type="button" onClick={() => setProfileOpen(!profileOpen)}>
-                {user?.photoURL ? <img src={user.photoURL} alt="" /> : <span>{getInitials(user)}</span>}
+                {user?.photoURL ? <img src={user.photoURL} alt="" referrerPolicy="no-referrer" /> : <span>{getInitials(user)}</span>}
               </button>
               {profileOpen ? (
-                <div className="profile-menu">
-                  <strong>{user?.displayName}</strong>
-                  <small>{user?.email}</small>
-                  <ProfileAccountSwitcher
-                    accounts={data?.connectedAccounts || bootstrap?.connectedAccounts || []}
-                    activeMailAccount={activeMailAccount}
-                    setActiveMailAccount={setActiveMailAccount}
-                  />
-                  <button type="button" onClick={() => login("google")}>
-                    <Users size={15} />
-                    Change account
-                  </button>
-                  <button type="button" onClick={logout}>
-                    <LogOut size={15} />
-                    Sign out
-                  </button>
-                </div>
+          <ProfileMenu
+                  user={user}
+                  accounts={enrichedProfileAccounts}
+                  requestedAccountEmail={routeParams.accountEmail}
+                  activeMailAccount={activeMailAccount}
+                  onSwitchAccount={switchMailAccount}
+                  onConnectAccount={connectMailAccount}
+                  onChangeLogin={changeAppLogin}
+                  onOpenSettings={openSettingsPage}
+                  onClose={() => setProfileOpen(false)}
+                  onLogout={logout}
+                />
               ) : null}
             </div>
           </div>
@@ -431,6 +659,269 @@ function MicrosoftLogo() {
   );
 }
 
+function ProfileMenu({
+  user,
+  accounts = [],
+  requestedAccountEmail = "",
+  activeMailAccount,
+  onSwitchAccount,
+  onConnectAccount,
+  onChangeLogin,
+  onOpenSettings,
+  onClose,
+  onLogout
+}) {
+  const mailAccounts = useMemo(
+    () => buildProfileMailAccounts(accounts, requestedAccountEmail),
+    [accounts, requestedAccountEmail]
+  );
+  const selectedAccount = useMemo(
+    () => getSelectedProfileAccount(mailAccounts, activeMailAccount, user),
+    [mailAccounts, activeMailAccount, user]
+  );
+  const firstName = (user?.displayName || user?.email || "there").split(/\s+|@/).filter(Boolean)[0];
+
+  return (
+    <div className="profile-menu account-popout">
+      <div className="account-popout-top">
+        <span>{user?.email}</span>
+        <button className="icon-button" type="button" onClick={onClose} aria-label="Close account menu">
+          <X size={18} />
+        </button>
+      </div>
+      <div className="account-popout-hero">
+        <AccountAvatar account={selectedAccount} className="large" />
+        <h2>Hi, {firstName}!</h2>
+        <button className="outline-button" type="button" onClick={onOpenSettings}>Manage Simple Track account</button>
+      </div>
+      <div className="account-popout-list">
+        <button
+          className={activeMailAccount === "all" ? "mail-account-row is-active" : "mail-account-row"}
+          type="button"
+          onClick={() => onSwitchAccount("all")}
+          aria-label="Show all accounts"
+        >
+          <span className="mail-account-avatar all">ST</span>
+          <span className="mail-account-copy">
+            <strong>All connected accounts</strong>
+            <small>Combined tracking view</small>
+          </span>
+          <span className="account-state">{activeMailAccount === "all" ? "Active" : "Switch"}</span>
+        </button>
+        {mailAccounts.map((account) => (
+          <MailAccountRow
+            key={account.email}
+            account={account}
+            active={normalizeAccountEmail(activeMailAccount) === account.email}
+            onSwitchAccount={onSwitchAccount}
+            onConnectAccount={onConnectAccount}
+            onChangeLogin={onChangeLogin}
+          />
+        ))}
+        <button className="mail-account-row action-row" type="button" onClick={() => onConnectAccount("")}>
+          <span className="mail-account-avatar add"><Plus size={20} /></span>
+          <span className="mail-account-copy">
+            <strong>Add another mail account</strong>
+            <small>Open Gmail, then connect from the extension</small>
+          </span>
+        </button>
+        <button className="mail-account-row action-row" type="button" onClick={() => onChangeLogin("")}>
+          <span className="mail-account-avatar neutral"><Users size={18} /></span>
+          <span className="mail-account-copy">
+            <strong>Change app login</strong>
+            <small>Switch the Simple Track web session</small>
+          </span>
+        </button>
+        <button className="mail-account-row action-row" type="button" onClick={onLogout}>
+          <span className="mail-account-avatar neutral"><LogOut size={18} /></span>
+          <span className="mail-account-copy">
+            <strong>Sign out</strong>
+            <small>End this web app session</small>
+          </span>
+        </button>
+      </div>
+      <p className="account-popout-note">Accounts connected in this browser can appear here; switch login to view that account's workspace.</p>
+    </div>
+  );
+}
+
+function MailAccountRow({ account, active, onSwitchAccount, onConnectAccount, onChangeLogin }) {
+  const connected = account.status === "connected";
+  const browserConnected = account.status === "browser_connected";
+  const needsLoginSwitch = account.status === "login_required";
+  const label = connected
+    ? active ? "Active" : "Switch"
+    : browserConnected || needsLoginSwitch ? "Switch" : "Connect";
+  const secondaryText = browserConnected
+    ? `${account.email} - connected in this browser`
+    : needsLoginSwitch ? `${account.email} - switch web app account` : account.email;
+
+  return (
+    <button
+      className={[
+        "mail-account-row",
+        active ? "is-active" : "",
+        connected ? "is-connected" : "",
+        browserConnected ? "is-browser-connected" : "",
+        needsLoginSwitch ? "is-browser-connected" : "",
+        !connected && !browserConnected && !needsLoginSwitch ? "is-pending" : ""
+      ].filter(Boolean).join(" ")}
+      type="button"
+      onClick={() => {
+        if (connected) {
+          onSwitchAccount(account.email);
+          return;
+        }
+        if (browserConnected || needsLoginSwitch) {
+          onChangeLogin(account.email);
+          return;
+        }
+        onChangeLogin(account.email);
+      }}
+      aria-label={connected ? `Switch to ${account.email}` : browserConnected || needsLoginSwitch ? `Switch app login to ${account.email}` : `Connect ${account.email}`}
+    >
+      <AccountAvatar account={account} />
+      <span className="mail-account-copy">
+        <strong>{account.displayName || account.email}</strong>
+        <small>{secondaryText}</small>
+      </span>
+      <span className="account-state">{label}</span>
+    </button>
+  );
+}
+
+function AccountAvatar({ account, className = "" }) {
+  const photoURL = account?.photoURL || account?.photoUrl || "";
+  const providerType = getAccountProviderType(account);
+
+  return (
+    <span className={["mail-account-avatar", "google-style", className].filter(Boolean).join(" ")}>
+      {photoURL ? (
+        <img src={photoURL} alt="" referrerPolicy="no-referrer" />
+      ) : (
+        <span className="mail-account-initials">{getInitials(account)}</span>
+      )}
+      {providerType === "google" ? (
+        <span className="provider-badge" aria-hidden="true">
+          <GoogleLogo />
+        </span>
+      ) : null}
+      {providerType === "microsoft" ? (
+        <span className="provider-badge microsoft" aria-hidden="true">
+          <MicrosoftLogo />
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+function getAccountProviderType(account) {
+  const provider = String(account?.provider || "").toLowerCase();
+  const client = String(account?.client || "").toLowerCase();
+  const email = String(account?.email || "").toLowerCase();
+  if (provider.includes("microsoft") || provider.includes("outlook")) return "microsoft";
+  if (client.includes("outlook") || email.includes("@outlook.") || email.includes("@hotmail.") || email.includes("@live.")) return "microsoft";
+  return "google";
+}
+
+function buildProfileMailAccounts(accounts, requestedAccountEmail = "") {
+  const byEmail = new Map();
+  for (const account of accounts) {
+    const normalized = normalizeAccountRecord(account);
+    if (!normalized) continue;
+    byEmail.set(normalized.email, normalized);
+  }
+
+  const requestedEmail = normalizeAccountEmail(requestedAccountEmail);
+  if (requestedEmail && !byEmail.has(requestedEmail)) {
+    byEmail.set(requestedEmail, {
+      email: requestedEmail,
+      displayName: requestedEmail,
+      photoURL: "",
+      client: "Gmail",
+      provider: "google",
+      status: "login_required"
+    });
+  }
+
+  return [...byEmail.values()].sort((a, b) => {
+    if (a.status === b.status) return a.email.localeCompare(b.email);
+    return accountStatusRank(a.status) - accountStatusRank(b.status);
+  });
+}
+
+function mergeProfileAccounts(workspaceAccounts = [], extensionAccounts = []) {
+  const byEmail = new Map();
+
+  for (const account of workspaceAccounts) {
+    const normalized = normalizeAccountRecord({ ...account, status: "connected" });
+    if (!normalized) continue;
+    byEmail.set(normalized.email, normalized);
+  }
+
+  for (const account of extensionAccounts) {
+    const normalized = normalizeAccountRecord({ ...account, status: "browser_connected" });
+    if (!normalized) continue;
+    const existing = byEmail.get(normalized.email);
+    if (existing) {
+      byEmail.set(normalized.email, {
+        ...existing,
+        displayName: existing.displayName || normalized.displayName,
+        photoURL: existing.photoURL || normalized.photoURL,
+        provider: existing.provider || normalized.provider,
+        client: existing.client || normalized.client
+      });
+      continue;
+    }
+    byEmail.set(normalized.email, normalized);
+  }
+
+  return [...byEmail.values()];
+}
+
+function enrichProfileAccounts(accounts = [], user = null) {
+  const userEmail = normalizeAccountEmail(user?.email);
+  return accounts.map((account) => {
+    if (account.photoURL || account.email !== userEmail) return account;
+    return {
+      ...account,
+      displayName: account.displayName || user?.displayName || account.email,
+      photoURL: user?.photoURL || getCachedProfilePhoto(account.email)
+    };
+  });
+}
+
+function getSelectedProfileAccount(accounts = [], activeMailAccount = "", user = null) {
+  const activeEmail = normalizeAccountEmail(activeMailAccount);
+  const userEmail = normalizeAccountEmail(user?.email);
+  const selected = activeEmail && activeEmail !== "all"
+    ? accounts.find((account) => account.email === activeEmail)
+    : accounts.find((account) => account.email === userEmail) || accounts[0];
+
+  if (selected) {
+    return {
+      ...selected,
+      photoURL: selected.photoURL || (selected.email === userEmail ? user?.photoURL : "") || getCachedProfilePhoto(selected.email)
+    };
+  }
+
+  return {
+    email: userEmail || user?.email || "",
+    displayName: user?.displayName || user?.email || "Simple Track User",
+    photoURL: user?.photoURL || getCachedProfilePhoto(userEmail),
+    provider: "google",
+    client: "Gmail",
+    status: "connected"
+  };
+}
+
+function accountStatusRank(status) {
+  if (status === "connected") return 0;
+  if (status === "browser_connected") return 1;
+  if (status === "login_required") return 1;
+  return 2;
+}
+
 function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, login, loginHarness, getToken, logout }) {
   const [params] = useState(() => readConnectionParams());
   const [status, setStatus] = useState("idle");
@@ -444,7 +935,7 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
     setMessage("");
     try {
       if (!user) {
-        await login("google");
+        await login("google", requestedEmail);
       } else {
         await connectSignedInUser();
       }
@@ -474,7 +965,8 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
         accountEmail: requestedEmail,
         client: params.client || "Gmail",
         provider: "google",
-        accountDisplayName: user?.displayName || requestedEmail
+        accountDisplayName: user?.displayName || requestedEmail,
+        accountPhotoURL: user?.photoURL || ""
       });
       setConnectedAccount(response.account);
       setStatus("connected");
@@ -489,7 +981,7 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
     if (user) await logout();
     setStatus("idle");
     setMessage("");
-    await login("google");
+    await login("google", requestedEmail);
     setStatus("signing-in");
   }
 
@@ -591,7 +1083,7 @@ function readConnectionParams() {
   };
 }
 
-function PageRouter({ activePage, query, activeMailAccount, data, setData, getToken, bootstrap }) {
+function PageRouter({ activePage, query, activeMailAccount, data, setData, getToken, bootstrap, focusedMessageId, setFocusedMessageId }) {
   const scopedMessages = useMemo(() => filterByAccount(data.messages || [], activeMailAccount), [data.messages, activeMailAccount]);
   const scopedMessageIds = useMemo(() => new Set(scopedMessages.map((message) => message.id)), [scopedMessages]);
   const scopedActivity = useMemo(() => filterEventsByAccount(data.activity || [], activeMailAccount, scopedMessageIds), [data.activity, activeMailAccount, scopedMessageIds]);
@@ -608,7 +1100,15 @@ function PageRouter({ activePage, query, activeMailAccount, data, setData, getTo
   }), [data.files, query, scopedActivity, scopedContacts, scopedLinks, scopedMessages]);
 
   if (activePage === "activity") return <LatestActivity activity={filtered.activity} />;
-  if (activePage === "email") return <EmailTracking messages={filtered.messages} />;
+  if (activePage === "email") {
+    return (
+      <EmailTracking
+        messages={filtered.messages}
+        focusedMessageId={focusedMessageId}
+        setFocusedMessageId={setFocusedMessageId}
+      />
+    );
+  }
   if (activePage === "links") return <LinkClicks links={filtered.links} />;
   if (activePage === "pdf") return <PdfAnalytics files={filtered.files} data={data} setData={setData} getToken={getToken} />;
   if (activePage === "performance") return <Performance performance={activeMailAccount === "all" ? data.performance : scopedPerformance} />;
@@ -651,13 +1151,14 @@ function LatestActivity({ activity }) {
   );
 }
 
-function EmailTracking({ messages }) {
+function EmailTracking({ messages, focusedMessageId, setFocusedMessageId }) {
   const [sort, setSort] = useState("lastActivity");
   const rows = [...messages].sort((a, b) => {
     if (sort === "opens") return Number(b.opens || 0) - Number(a.opens || 0);
     if (sort === "sent") return new Date(b.sentAt || 0) - new Date(a.sentAt || 0);
     return new Date(b.lastActivityAt || b.sentAt || 0) - new Date(a.lastActivityAt || a.sentAt || 0);
   });
+  const focusedMessage = focusedMessageId ? rows.find((message) => message.id === focusedMessageId) : null;
 
   return (
     <section className="content-card">
@@ -681,10 +1182,76 @@ function EmailTracking({ messages }) {
             <span>Sent on {formatDate(message.sentAt)}</span>
           </div>,
           <ActivitySummary message={message} />,
-          <button className="icon-button table-action" type="button" aria-label="More actions"><MoreHorizontal size={18} /></button>
+          <button
+            className="icon-button table-action"
+            type="button"
+            aria-label={`Open report for ${message.subject}`}
+            onClick={() => setFocusedMessageId(message.id)}
+          >
+            <MoreHorizontal size={18} />
+          </button>
         ])}
       />
+      {focusedMessage ? (
+        <MessageDetailDialog message={focusedMessage} onClose={() => setFocusedMessageId("")} />
+      ) : null}
     </section>
+  );
+}
+
+function MessageDetailDialog({ message, onClose }) {
+  const events = getSortedMessageEvents(message);
+  return (
+    <div className="modal-backdrop">
+      <section className="dialog report-dialog" role="dialog" aria-modal="true" aria-labelledby="message-report-title">
+        <button className="icon-button dialog-close" type="button" onClick={onClose} aria-label="Close">
+          <X size={18} />
+        </button>
+        <span className="detail-kicker">{message.accountEmail || "Tracked email"}</span>
+        <h2 id="message-report-title">Message report</h2>
+        <p className="detail-subject">{message.subject}</p>
+        <div className="report-stat-grid">
+          <Metric label="Opens" value={Number(message.opens || 0)} trend="email" />
+          <Metric label="Clicks" value={Number(message.clicks || 0)} trend="links" />
+          <Metric label="Files" value={Number(message.attachmentOpens || 0)} trend="attachments" />
+        </div>
+        <dl className="detail-grid">
+          <div>
+            <dt>Recipients</dt>
+            <dd>{(message.recipients || []).join(", ") || "No recipients"}</dd>
+          </div>
+          <div>
+            <dt>Sent</dt>
+            <dd>{formatDate(message.sentAt)}</dd>
+          </div>
+          <div>
+            <dt>Last activity</dt>
+            <dd>{message.lastActivityAt ? formatDate(message.lastActivityAt) : "No activity yet"}</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd>{summaryText(Number(message.opens || 0), Number(message.clicks || 0), Number(message.attachmentOpens || 0))}</dd>
+          </div>
+        </dl>
+        <div className="detail-events">
+          <div className="section-heading compact">
+            <h3>Event timeline</h3>
+            <span>{events.length} recent</span>
+          </div>
+          {events.length ? events.map((event, index) => (
+            <article className="detail-event-row" key={`${event.type}-${event.createdAt}-${index}`}>
+              <EventIcon type={event.type} />
+              <div>
+                <strong>{messageEventTitle(event)}</strong>
+                <span>{formatDate(event.createdAt)} - {event.device || "Unknown device"} - {event.location || "Unknown location"}</span>
+              </div>
+            </article>
+          )) : (
+            <p className="detail-empty">No opens, clicks, or file events recorded yet.</p>
+          )}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1289,6 +1856,32 @@ function summaryText(opens, clicks, files) {
   if (clicks) parts.push(`${clicks} click${clicks === 1 ? "" : "s"}`);
   if (files) parts.push(`${files} file${files === 1 ? "" : "s"}`);
   return parts.length ? parts.join(" - ") : "Sent, not read";
+}
+
+function getSortedMessageEvents(message) {
+  return [...(Array.isArray(message.events) ? message.events : [])]
+    .filter(Boolean)
+    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+}
+
+function messageEventTitle(event) {
+  if (event.type === "open") return "Opened email";
+  if (event.type === "attachment_open") return `Opened file: ${messageEventTarget(event)}`;
+  if (event.type === "pdf_view") return `Viewed PDF: ${messageEventTarget(event)}`;
+  if (event.type === "pdf_download") return `Downloaded PDF: ${messageEventTarget(event)}`;
+  return `Clicked link: ${messageEventTarget(event)}`;
+}
+
+function messageEventTarget(event) {
+  if (event.label) return event.label;
+  if (!event.url) return "tracked item";
+
+  try {
+    const url = new URL(event.url);
+    return `${url.hostname}${url.pathname}`.replace(/\/$/, "");
+  } catch {
+    return event.url;
+  }
 }
 
 function eventVerb(type) {

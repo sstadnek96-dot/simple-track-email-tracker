@@ -1,4 +1,5 @@
 const fallbackState = {
+  ok: true,
   messages: [
     {
       id: "preview",
@@ -32,12 +33,17 @@ const fallbackState = {
     }
   ],
   settings: { trackingEnabled: true },
-  summary: { sent: 1, opened: 1, unopened: 0, clicked: 0, attachmentOpened: 1, openRate: 100 }
+  summary: { sent: 1, opened: 1, unopened: 0, clicked: 0, attachmentOpened: 1, openRate: 100 },
+  connectedAccounts: [],
+  activeAccountEmail: "",
+  accountStatus: { status: "unknown_account", accountEmail: "", connectedAccounts: [] },
+  activeTabAccount: { accountEmail: "", client: "", isMailTab: false, detected: false }
 };
 
 let currentState = fallbackState;
 let currentFilter = "all";
 let currentSearch = "";
+let accountActionBusy = false;
 let popupRefreshTimer = null;
 let realtimeSource = null;
 let activeRealtimeUrl = null;
@@ -47,8 +53,16 @@ let openMessageIds = new Set();
 
 const POPUP_REFRESH_MS = 2500;
 const REALTIME_HEALTH_REFRESH_MS = 5 * 60 * 1000;
+const WEB_APP_URL = "https://simple-track-prod-app.web.app";
+const MAIL_HOST_PATTERN = /mail\.google\.com|outlook\.live\.com|outlook\.office\.com|outlook\.office365\.com/i;
 
 const elements = {
+  accountPanel: document.querySelector("#accountPanel"),
+  accountAvatar: document.querySelector("#accountAvatar"),
+  accountEmail: document.querySelector("#accountEmail"),
+  accountStatus: document.querySelector("#accountStatus"),
+  connectAccount: document.querySelector("#connectAccount"),
+  disconnectAccount: document.querySelector("#disconnectAccount"),
   activityList: document.querySelector("#activityList"),
   template: document.querySelector("#messageTemplate"),
   searchInput: document.querySelector("#searchInput"),
@@ -65,6 +79,9 @@ async function init() {
   render();
   syncRealtimeStream(currentState.realtimeUrl);
 
+  elements.connectAccount.addEventListener("click", connectCurrentAccount);
+  elements.disconnectAccount.addEventListener("click", disconnectCurrentAccount);
+
   elements.searchInput.addEventListener("input", (event) => {
     currentSearch = event.target.value.trim().toLowerCase();
     renderMessages();
@@ -78,11 +95,7 @@ async function init() {
     });
   });
 
-  elements.openOptions.addEventListener("click", () => {
-    if (globalThis.chrome?.runtime?.openOptionsPage) {
-      chrome.runtime.openOptionsPage();
-    }
-  });
+  elements.openOptions.addEventListener("click", () => openWebAppForCurrentAccount());
 
   for (const tab of elements.tabs) {
     tab.addEventListener("click", () => {
@@ -108,10 +121,15 @@ async function init() {
 }
 
 async function getState() {
-  const response = await sendMessage({ type: "simpleTrack:getState" });
-  if (!response?.ok) return fallbackState;
+  const activeTabAccount = await getActiveTabAccountContext();
+  const response = await sendMessage({
+    type: "simpleTrack:getState",
+    accountEmail: activeTabAccount.accountEmail || "",
+    client: activeTabAccount.client || ""
+  });
+  if (!response?.ok) return normalizePopupState(fallbackState, activeTabAccount);
   lastFullStateRefreshAt = Date.now();
-  return response;
+  return normalizePopupState(response, activeTabAccount);
 }
 
 async function sendMessage(message) {
@@ -125,6 +143,108 @@ async function sendMessage(message) {
     console.warn("Simple Track popup fell back to preview data", error);
     return fallbackState;
   }
+}
+
+async function getActiveTabAccountContext() {
+  if (!globalThis.chrome?.tabs?.query || !globalThis.chrome?.tabs?.sendMessage) {
+    return { accountEmail: "", client: "", isMailTab: false, detected: false };
+  }
+
+  let tabContext = { accountEmail: "", client: "", isMailTab: false, detected: false };
+
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs?.[0];
+    const url = String(tab?.url || "");
+    const isMailTab = MAIL_HOST_PATTERN.test(url);
+    const client = getClientFromUrl(url);
+    tabContext = { accountEmail: "", client, isMailTab, detected: false };
+
+    if (!tab?.id || !isMailTab) {
+      return tabContext;
+    }
+
+    const response = await detectAccountFromTab(tab.id);
+    const accountEmail = normalizeEmail(response?.accountEmail);
+    return {
+      accountEmail,
+      client: response?.client || client,
+      isMailTab: true,
+      detected: Boolean(accountEmail),
+      accountStatus: response?.accountStatus || null
+    };
+  } catch (error) {
+    return {
+      ...tabContext,
+      detected: false,
+      error: error.message
+    };
+  }
+}
+
+async function detectAccountFromTab(tabId) {
+  try {
+    return await chrome.tabs.sendMessage(tabId, { type: "simpleTrack:detectAccount" });
+  } catch (error) {
+    if (!globalThis.chrome?.scripting?.executeScript) throw error;
+    await injectContentScript(tabId);
+    return retryDetectAccountFromTab(tabId);
+  }
+}
+
+async function retryDetectAccountFromTab(tabId) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await delay(150 + attempt * 100);
+    try {
+      return await chrome.tabs.sendMessage(tabId, { type: "simpleTrack:detectAccount" });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("Could not reach the Simple Track content script.");
+}
+
+async function injectContentScript(tabId) {
+  try {
+    if (globalThis.chrome?.scripting?.insertCSS) {
+      await chrome.scripting.insertCSS({
+        target: { tabId },
+        files: ["src/content/email-tracker-content.css"]
+      });
+    }
+  } catch (error) {
+    console.warn("Simple Track popup could not inject CSS into the active mail tab", error);
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["src/content/email-tracker-content.js"]
+  });
+}
+
+function normalizePopupState(response, activeTabAccount) {
+  const connectedAccounts = Array.isArray(response.connectedAccounts) ? response.connectedAccounts : [];
+  const accountEmail = normalizeEmail(
+    activeTabAccount.accountEmail ||
+    response.accountStatus?.accountEmail ||
+    response.activeAccountEmail
+  );
+  const accountStatus = response.accountStatus || activeTabAccount.accountStatus || getLocalAccountStatus(accountEmail, connectedAccounts);
+
+  return {
+    ...fallbackState,
+    ...response,
+    connectedAccounts,
+    activeTabAccount,
+    activeAccountEmail: accountEmail || normalizeEmail(response.activeAccountEmail),
+    accountStatus: {
+      ...accountStatus,
+      accountEmail: normalizeEmail(accountStatus.accountEmail || accountEmail),
+      connectedAccounts
+    }
+  };
 }
 
 function startPopupRefresh() {
@@ -228,7 +348,149 @@ function render() {
   const { settings } = currentState;
   elements.trackingToggle.checked = Boolean(settings.trackingEnabled);
 
+  renderAccountPanel();
   renderMessages();
+}
+
+function renderAccountPanel() {
+  const accountEmail = getCurrentPopupAccountEmail();
+  const status = getCurrentPopupAccountStatus();
+  const activeTab = currentState.activeTabAccount || {};
+  const isConnected = status.status === "connected";
+  const isDisconnected = Boolean(activeTab.isMailTab && accountEmail && !isConnected);
+
+  elements.accountPanel.classList.toggle("is-connected", isConnected);
+  elements.accountPanel.classList.toggle("is-disconnected", isDisconnected);
+  renderAccountAvatar(accountEmail, status.account);
+  elements.accountEmail.textContent = accountEmail || "No mail account detected";
+  elements.accountStatus.textContent = getAccountStatusLabel(status, activeTab);
+
+  elements.connectAccount.hidden = !accountEmail || isConnected;
+  elements.disconnectAccount.hidden = !accountEmail || !isConnected;
+  elements.connectAccount.disabled = accountActionBusy;
+  elements.disconnectAccount.disabled = accountActionBusy;
+  elements.connectAccount.textContent = accountActionBusy ? "Opening..." : "Connect";
+  elements.disconnectAccount.textContent = accountActionBusy ? "Saving..." : "Log out";
+}
+
+function renderAccountAvatar(accountEmail, account = null) {
+  const photoURL = account?.photoURL || account?.photoUrl || "";
+  elements.accountAvatar.replaceChildren();
+  elements.accountAvatar.classList.toggle("has-photo", Boolean(photoURL));
+
+  if (photoURL) {
+    const image = document.createElement("img");
+    image.src = photoURL;
+    image.alt = "";
+    image.referrerPolicy = "no-referrer";
+    elements.accountAvatar.append(image);
+    return;
+  }
+
+  elements.accountAvatar.textContent = getAccountInitials(accountEmail || account?.displayName || "ST");
+}
+
+function getCurrentPopupAccountEmail() {
+  const activeTab = currentState.activeTabAccount || {};
+
+  return normalizeEmail(
+    activeTab.accountEmail ||
+    currentState.accountStatus?.accountEmail ||
+    currentState.activeAccountEmail
+  );
+}
+
+function getCurrentPopupAccountStatus() {
+  const accountEmail = getCurrentPopupAccountEmail();
+  return currentState.accountStatus || getLocalAccountStatus(accountEmail, currentState.connectedAccounts || []);
+}
+
+function getAccountStatusLabel(status, activeTab) {
+  const client = activeTab.client || status.account?.client || "mail";
+
+  if (activeTab.isMailTab && !activeTab.detected) {
+    if (status.status === "connected" && status.accountEmail) {
+      return `Tracking is connected. Gmail did not expose the active tab address yet.`;
+    }
+
+    return `Could not detect this ${client} account yet.`;
+  }
+
+  if (status.status === "connected") {
+    return `Tracking is connected for this ${client} account.`;
+  }
+
+  if (activeTab.isMailTab && status.accountEmail) {
+    return `Connect this ${client} account before tracking sends.`;
+  }
+
+  if (status.accountEmail) {
+    return "Last connected account. Open Gmail or Outlook to switch context.";
+  }
+
+  return "Open Gmail or Outlook to connect tracking.";
+}
+
+function getAccountInitials(value) {
+  const source = String(value || "ST").trim();
+  if (source.includes("@")) return source[0]?.toUpperCase() || "ST";
+  return source
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("") || "ST";
+}
+
+async function connectCurrentAccount() {
+  const accountEmail = getCurrentPopupAccountEmail();
+  if (!accountEmail) return;
+
+  accountActionBusy = true;
+  renderAccountPanel();
+  try {
+    const response = await sendMessage({
+      type: "simpleTrack:startAccountConnection",
+      accountEmail,
+      client: currentState.activeTabAccount?.client || "Gmail"
+    });
+    if (response?.connectedAccounts) {
+      currentState = normalizePopupState({
+        ...currentState,
+        connectedAccounts: response.connectedAccounts,
+        activeAccountEmail: response.activeAccountEmail || accountEmail,
+        accountStatus: response.accountStatus
+      }, currentState.activeTabAccount || {});
+    }
+    currentState = await getState();
+    syncRealtimeStream(currentState.realtimeUrl);
+  } finally {
+    accountActionBusy = false;
+    render();
+  }
+}
+
+async function disconnectCurrentAccount() {
+  const accountEmail = getCurrentPopupAccountEmail();
+  if (!accountEmail) return;
+
+  accountActionBusy = true;
+  renderAccountPanel();
+  try {
+    const response = await sendMessage({ type: "simpleTrack:disconnectAccount", accountEmail });
+    if (response?.ok) {
+      currentState = normalizePopupState({
+        ...currentState,
+        connectedAccounts: response.connectedAccounts || [],
+        activeAccountEmail: response.activeAccountEmail || "",
+        accountStatus: response.accountStatus
+      }, currentState.activeTabAccount || {});
+      syncRealtimeStream(currentState.realtimeUrl);
+    }
+  } finally {
+    accountActionBusy = false;
+    render();
+  }
 }
 
 function renderMessages() {
@@ -290,6 +552,13 @@ function renderMessages() {
     muteButton.textContent = message.muted ? "Muted" : "Mute";
     muteButton.addEventListener("click", () => toggleMuted(message.id, !message.muted));
 
+    const webReportButton = node.querySelector(".web-report-button");
+    webReportButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openMessageInWebApp(message);
+    });
+
     const deleteButton = node.querySelector(".delete-button");
     deleteButton.addEventListener("click", (event) => {
       event.preventDefault();
@@ -325,6 +594,120 @@ async function deleteMessage(id) {
   currentState.messages = currentState.messages.filter((message) => message.id !== id);
   render();
   await sendMessage({ type: "simpleTrack:deleteMessage", id });
+}
+
+async function openMessageInWebApp(message) {
+  await openWebApp({
+    page: "email",
+    messageId: message.id,
+    accountEmail: getCurrentPopupAccountEmail() || message.accountEmail
+  });
+}
+
+async function openWebAppForCurrentAccount() {
+  await openWebApp({
+    page: "activity",
+    accountEmail: getCurrentPopupAccountEmail()
+  });
+}
+
+async function openWebApp({ page = "activity", messageId = "", accountEmail = "" } = {}) {
+  const url = new URL(WEB_APP_URL);
+  url.searchParams.set("page", page);
+  const normalizedAccountEmail = normalizeEmail(accountEmail);
+  if (normalizedAccountEmail) url.searchParams.set("accountEmail", normalizedAccountEmail);
+  if (messageId) url.searchParams.set("messageId", messageId);
+  url.searchParams.set("source", "chrome-extension");
+  const context = buildWebAppContext(normalizedAccountEmail);
+  const handoff = await createWebAppSessions(normalizedAccountEmail);
+  if (context) {
+    url.hash = new URLSearchParams({
+      stContext: encodeWebAppContext({
+        ...context,
+        handoffToken: handoff?.activeToken || "",
+        handoffAccountEmail: handoff?.activeAccountEmail || normalizedAccountEmail,
+        handoffTokens: handoff?.tokens || {}
+      })
+    }).toString();
+  }
+
+  openUrl(url.toString());
+}
+
+async function createWebAppSessions(activeAccountEmail) {
+  const emails = new Set(
+    (currentState.connectedAccounts || [])
+      .map((account) => normalizeEmail(account.email))
+      .filter(Boolean)
+  );
+  const normalizedActiveEmail = normalizeEmail(activeAccountEmail);
+  if (normalizedActiveEmail) emails.add(normalizedActiveEmail);
+
+  const tokens = {};
+  await Promise.all([...emails].map(async (email) => {
+    const session = await createWebAppSession(email);
+    if (session?.customToken) tokens[email] = session.customToken;
+  }));
+
+  return {
+    tokens,
+    activeAccountEmail: normalizedActiveEmail,
+    activeToken: tokens[normalizedActiveEmail] || ""
+  };
+}
+
+async function createWebAppSession(accountEmail) {
+  if (!accountEmail) return null;
+
+  try {
+    const response = await sendMessage({
+      type: "simpleTrack:createWebAppSession",
+      accountEmail
+    });
+    if (!response?.ok) return null;
+    return response;
+  } catch (error) {
+    console.warn("Simple Track could not create a web app handoff session", error);
+    return null;
+  }
+}
+
+function buildWebAppContext(activeAccountEmail = "") {
+  const connectedAccounts = Array.isArray(currentState.connectedAccounts)
+    ? currentState.connectedAccounts
+        .map((account) => ({
+          email: normalizeEmail(account.email),
+          displayName: account.displayName || account.name || account.email || "",
+          photoURL: account.photoURL || account.photoUrl || "",
+          provider: account.provider || "google",
+          client: account.client || "Gmail",
+          status: account.status || "connected"
+        }))
+        .filter((account) => account.email)
+    : [];
+
+  if (!connectedAccounts.length && !currentState.installId) return null;
+
+  return {
+    installId: currentState.installId || "",
+    activeAccountEmail: normalizeEmail(activeAccountEmail || currentState.activeAccountEmail),
+    connectedAccounts
+  };
+}
+
+function encodeWebAppContext(context) {
+  const bytes = new TextEncoder().encode(JSON.stringify(context));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function openUrl(url) {
+  if (globalThis.chrome?.tabs?.create) {
+    chrome.tabs.create({ url, active: true });
+  } else {
+    globalThis.open(url, "_blank", "noopener");
+  }
 }
 
 function matchesFilter(message) {
@@ -591,4 +974,31 @@ function formatDetailedDate(value) {
     hour: "numeric",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function getLocalAccountStatus(accountEmail, connectedAccounts = []) {
+  const normalizedEmail = normalizeEmail(accountEmail);
+  const accounts = Array.isArray(connectedAccounts) ? connectedAccounts : [];
+  const account = accounts.find((entry) => normalizeEmail(entry.email) === normalizedEmail);
+
+  return {
+    status: account ? "connected" : normalizedEmail ? "not_connected" : "unknown_account",
+    accountEmail: normalizedEmail,
+    account: account || null,
+    connectedAccounts: accounts
+  };
+}
+
+function getClientFromUrl(url) {
+  if (/outlook\.|office365\./i.test(url)) return "Outlook";
+  if (/mail\.google\.com/i.test(url)) return "Gmail";
+  return "";
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

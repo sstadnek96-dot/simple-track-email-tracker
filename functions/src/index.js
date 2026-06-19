@@ -355,6 +355,12 @@ async function handleAppRequest(req, res, route) {
     return;
   }
 
+  if (req.method === "POST" && appRoute === "/extension-session") {
+    await enforceAppRateLimit(req, "extension-session", 60, 15 * 60);
+    await createExtensionAppSession(req, res);
+    return;
+  }
+
   const context = await requireAppContext(req);
 
   if (req.method === "GET" && appRoute === "/bootstrap") {
@@ -572,6 +578,7 @@ async function connectExtensionAccount(context, req, res) {
   const provider = cleanString(body.provider, 40) || "google";
   const client = cleanString(body.client, 80) || "Gmail";
   const accountDisplayName = cleanString(body.accountDisplayName, 160) || context.user.displayName || accountEmail;
+  const accountPhotoURL = cleanString(body.accountPhotoURL || body.accountPhotoUrl || context.user.photoURL, 1000);
 
   if (!installId || !installSecret || !accountEmail) {
     res.status(400).json({ ok: false, error: "Install ID, install secret, and account email are required" });
@@ -593,6 +600,7 @@ async function connectExtensionAccount(context, req, res) {
   const account = {
     email: accountEmail,
     displayName: accountDisplayName,
+    photoURL: accountPhotoURL,
     provider,
     client,
     orgId: context.org.id,
@@ -622,6 +630,8 @@ async function connectExtensionAccount(context, req, res) {
     accounts: {
       [accountEmail]: {
         email: accountEmail,
+        displayName: accountDisplayName,
+        photoURL: accountPhotoURL,
         orgId: context.org.id,
         userUid: context.uid,
         provider,
@@ -654,6 +664,46 @@ async function connectExtensionAccount(context, req, res) {
     account: { id: accountEmail, ...serializeTimestamps(account) },
     installId,
     linkedMessages: messagesSnapshot.size
+  });
+}
+
+async function createExtensionAppSession(req, res) {
+  const body = await readJson(req);
+  const installId = cleanString(body.installId, 120);
+  const accountEmail = normalizeEmail(body.accountEmail);
+
+  if (!installId || !accountEmail) {
+    res.status(400).json({ ok: false, error: "Install ID and account email are required" });
+    return;
+  }
+
+  const install = await getInstallForId(installId);
+  if (!install?.installSecretHash || !isInstallSecretValid(install, getInstallSecretFromRequest(req, body))) {
+    res.status(401).json({ ok: false, error: "Install authentication failed" });
+    return;
+  }
+
+  const connectedAccount = getConnectedAccount(install, accountEmail);
+  if (!connectedAccount?.userUid) {
+    res.status(403).json({ ok: false, error: `${accountEmail} is not connected to this extension install` });
+    return;
+  }
+
+  const customToken = await getAuth().createCustomToken(connectedAccount.userUid, {
+    simpleTrackAccountEmail: accountEmail,
+    simpleTrackInstallId: installId
+  });
+
+  res.status(200).json({
+    ok: true,
+    customToken,
+    accountEmail,
+    activeAccountEmail: accountEmail,
+    connectedAccounts: getInstallConnectedAccounts(install),
+    account: serializeTimestamps({
+      ...connectedAccount,
+      email: accountEmail
+    })
   });
 }
 
@@ -1174,6 +1224,7 @@ function getInstallConnectedAccounts(install) {
     .map((account) => serializeTimestamps({
       email: normalizeEmail(account.email),
       displayName: cleanString(account.displayName, 160) || normalizeEmail(account.email),
+      photoURL: cleanString(account.photoURL || account.photoUrl, 1000),
       provider: cleanString(account.provider, 40) || "google",
       client: cleanString(account.client, 80) || "Gmail",
       orgId: cleanString(account.orgId, 160),

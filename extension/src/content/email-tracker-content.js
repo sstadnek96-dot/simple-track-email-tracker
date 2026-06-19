@@ -108,6 +108,27 @@
       });
     }
 
+    if (globalThis.chrome?.runtime?.onMessage) {
+      chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+        if (message?.type !== "simpleTrack:detectAccount") return false;
+
+        try {
+          refreshDetectedAccount();
+          const accountEmail = activeAccountEmail || detectCurrentMailAccountEmail();
+          sendResponse({
+            ok: true,
+            accountEmail,
+            client: getClientName(),
+            accountStatus: getLocalAccountStatus(accountEmail)
+          });
+        } catch (error) {
+          sendResponse({ ok: false, error: error.message });
+        }
+
+        return false;
+      });
+    }
+
     scheduleStateRefresh(ACTIVE_STATE_REFRESH_MS);
   }
 
@@ -1540,7 +1561,7 @@
     if (accountControlEmail) return accountControlEmail;
 
     const headerEmail = findEmailInElements(
-      [...document.querySelectorAll("[aria-label*='@'], [title*='@'], img[alt*='@']")]
+      [...document.querySelectorAll("[aria-label*='@'], [title*='@'], [data-email*='@'], [data-hovercard-id*='@'], img[alt*='@']")]
         .filter((element) => !element.closest("tr.zA, div[role='listitem'], div[role='main'], table[role='grid']"))
     );
     if (headerEmail) return headerEmail;
@@ -1568,6 +1589,7 @@
         element.getAttribute("aria-label"),
         element.getAttribute("title"),
         element.getAttribute("data-email"),
+        element.getAttribute("data-hovercard-id"),
         element.getAttribute("email"),
         element.getAttribute("alt"),
         element.textContent

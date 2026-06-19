@@ -10,6 +10,24 @@ const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const appUrl = "http://127.0.0.1:4173/?harness=1";
 const connectUrl = "http://127.0.0.1:4173/connect-extension?harness=1#installId=harness-install&installSecret=harness-secret&accountEmail=s.stadnek96@gmail.com&client=Gmail";
 const apiBase = "https://us-central1-simple-track-prod.cloudfunctions.net/api";
+const extensionContext = Buffer.from(JSON.stringify({
+  installId: "harness-install",
+  activeAccountEmail: "s.stadnek96@gmail.com",
+  connectedAccounts: [
+    {
+      email: "s.stadnek96@gmail.com",
+      displayName: "Spencer Davidson",
+      provider: "google",
+      client: "Gmail"
+    },
+    {
+      email: "spencer.tpp@gmail.com",
+      displayName: "Spencer Stadnek",
+      provider: "google",
+      client: "Gmail"
+    }
+  ]
+}), "utf8").toString("base64url");
 
 run().catch((error) => {
   console.error(error);
@@ -197,19 +215,47 @@ async function runBrowserChecks() {
       await page.waitForSelector(`h1:text("${heading}")`);
     }
 
+    await page.goto(`${appUrl}&page=activity&accountEmail=s.stadnek96@gmail.com`);
+    await page.waitForSelector(".auth-modal");
+    await page.getByRole("button", { name: /Use harness account/i }).click();
+    await page.waitForSelector("h1:text('Latest activity')");
+    await page.waitForSelector("text=Question About Lawncare");
+    assert.equal(await page.getByText("Signed intake package").count(), 0, "activity route should scope to the requested mail account");
+
+    await page.goto(`${appUrl}&page=email&messageId=msg-1002&accountEmail=s.stadnek96@gmail.com`);
+    await page.waitForSelector(".auth-modal");
+    await page.getByRole("button", { name: /Use harness account/i }).click();
+    await page.waitForSelector("h1:text('Email tracking')");
+    await page.waitForSelector("text=Message report");
+    await page.waitForSelector("text=lawncare-pricing.pdf");
+    await page.getByLabel("Close").click();
+
     await page.getByRole("button", { name: "Email tracking" }).first().click();
     await page.waitForSelector("text=Question About Lawncare");
     assert.equal(await page.getByText("Signed intake package").count(), 0, "default selected account should hide another account's messages");
     await page.locator(".profile-button").click();
-    await page.locator(".account-switcher select").selectOption("sstadnek96@gmail.com");
-    await page.locator(".profile-button").click();
+    await page.getByRole("button", { name: "Switch to sstadnek96@gmail.com" }).click();
     await page.waitForSelector("text=Signed intake package");
     assert.equal(await page.getByText("Question About Lawncare").count(), 0, "selected account should hide the first account's messages");
     await page.locator(".profile-button").click();
-    await page.locator(".account-switcher select").selectOption("all");
-    await page.locator(".profile-button").click();
+    await page.getByRole("button", { name: "Show all accounts" }).click();
     await page.waitForSelector("text=Question About Lawncare");
 
+    await page.goto(`${appUrl}&page=activity&accountEmail=s.stadnek96@gmail.com#stContext=${extensionContext}`);
+    await page.waitForSelector(".auth-modal");
+    await page.getByRole("button", { name: /Use harness account/i }).click();
+    await page.locator(".profile-button").click();
+    await page.waitForSelector("text=spencer.tpp@gmail.com");
+    await page.waitForSelector("text=connected in this browser");
+    assert.equal(
+      await page.getByRole("button", { name: "Switch app login to spencer.tpp@gmail.com" }).count(),
+      1,
+      "extension-connected account should be switchable from the web app profile menu"
+    );
+    await page.getByLabel("Close account menu").click();
+
+    await page.getByRole("button", { name: "Email tracking" }).first().click();
+    await page.waitForSelector("h1:text('Email tracking')");
     await page.getByPlaceholder(/Search recipients/i).fill("lawncare");
     await page.waitForSelector("text=Question About Lawncare");
     await page.getByPlaceholder(/Search recipients/i).fill("");
