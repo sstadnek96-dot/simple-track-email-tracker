@@ -361,6 +361,12 @@ async function handleAppRequest(req, res, route) {
     return;
   }
 
+  if (req.method === "POST" && appRoute === "/extension-disconnect") {
+    await enforceAppRateLimit(req, "extension-disconnect", 60, 15 * 60);
+    await disconnectExtensionAccount(req, res);
+    return;
+  }
+
   const context = await requireAppContext(req);
 
   if (req.method === "GET" && appRoute === "/bootstrap") {
@@ -704,6 +710,91 @@ async function createExtensionAppSession(req, res) {
       ...connectedAccount,
       email: accountEmail
     })
+  });
+}
+
+async function disconnectExtensionAccount(req, res) {
+  const body = await readJson(req);
+  const installId = cleanString(body.installId, 120);
+  const accountEmail = normalizeEmail(body.accountEmail);
+
+  if (!installId || !accountEmail) {
+    res.status(400).json({ ok: false, error: "Install ID and account email are required" });
+    return;
+  }
+
+  const installRef = db.collection(INSTALLS).doc(installId);
+  const now = Timestamp.now();
+  let nextInstall = null;
+  let auditContext = null;
+
+  await db.runTransaction(async (transaction) => {
+    const installSnapshot = await transaction.get(installRef);
+    if (!installSnapshot.exists) {
+      const error = new Error("Install not found");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const install = installSnapshot.data();
+    if (!install?.installSecretHash || !isInstallSecretValid(install, getInstallSecretFromRequest(req, body))) {
+      const error = new Error("Install authentication failed");
+      error.statusCode = 401;
+      throw error;
+    }
+
+    const accounts = install.accounts && typeof install.accounts === "object" ? { ...install.accounts } : {};
+    const removedAccount = accounts[accountEmail] || null;
+    const orgAccountRef = removedAccount?.orgId
+      ? db.collection(ORGS).doc(removedAccount.orgId).collection(MAIL_ACCOUNTS).doc(accountEmail)
+      : null;
+    const orgAccountSnapshot = orgAccountRef ? await transaction.get(orgAccountRef) : null;
+    delete accounts[accountEmail];
+
+    const remainingAccounts = Object.values(accounts).filter((account) => account?.email);
+    const activeAccountEmail = install.activeAccountEmail === accountEmail
+      ? normalizeEmail(remainingAccounts[0]?.email)
+      : normalizeEmail(install.activeAccountEmail);
+    const safeActiveAccountEmail = remainingAccounts.some((account) => normalizeEmail(account.email) === activeAccountEmail)
+      ? activeAccountEmail
+      : normalizeEmail(remainingAccounts[0]?.email);
+
+    transaction.update(installRef, {
+      accounts,
+      activeAccountEmail: safeActiveAccountEmail || "",
+      updatedAt: now
+    });
+    transaction.delete(installRef.collection(MAIL_ACCOUNTS).doc(accountEmail));
+
+    if (removedAccount?.orgId && orgAccountRef) {
+      if (orgAccountSnapshot.exists && orgAccountSnapshot.data().installId === installId) {
+        transaction.delete(orgAccountRef);
+      }
+      auditContext = {
+        uid: removedAccount.userUid || install.ownerUid || null,
+        org: { id: removedAccount.orgId },
+        accountEmail
+      };
+    }
+
+    nextInstall = {
+      ...install,
+      accounts,
+      activeAccountEmail: safeActiveAccountEmail || "",
+      updatedAt: now
+    };
+  });
+
+  if (auditContext) {
+    await writeAuditLog(auditContext, "mail_account.disconnect", "mailAccount", accountEmail, { installId });
+  }
+
+  res.status(200).json({
+    ok: true,
+    installId,
+    activeAccountEmail: nextInstall?.activeAccountEmail || "",
+    connectedAccounts: getInstallConnectedAccounts(nextInstall),
+    accountStatus: getAccountConnectionStatus(nextInstall, accountEmail)
   });
 }
 

@@ -16,7 +16,6 @@ import {
   Mail,
   Menu,
   MoreHorizontal,
-  Plus,
   Search,
   Settings,
   ShieldCheck,
@@ -261,6 +260,10 @@ function App() {
     () => enrichProfileAccounts(profileAccounts, user),
     [profileAccounts, user]
   );
+  const selectedProfileAccount = useMemo(
+    () => getSelectedProfileAccount(enrichedProfileAccounts, activeMailAccount, user),
+    [enrichedProfileAccounts, activeMailAccount, user]
+  );
 
   useEffect(() => {
     return onAuthStateChanged(auth, (authUser) => {
@@ -372,14 +375,6 @@ function App() {
     setProfileOpen(false);
   }
 
-  function connectMailAccount(accountEmail = "") {
-    setProfileOpen(false);
-    const target = accountEmail
-      ? `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(accountEmail)}`
-      : "https://mail.google.com/";
-    window.open(target, "_blank", "noopener,noreferrer");
-  }
-
   function changeAppLogin(accountEmail = "") {
     setProfileOpen(false);
     const normalizedEmail = normalizeAccountEmail(accountEmail);
@@ -392,7 +387,13 @@ function App() {
       return;
     }
 
-    login("google", accountEmail);
+    if (normalizedEmail) {
+      setError(`Open Simple Track from the Chrome extension while viewing ${normalizedEmail} to switch that connected account without another Google login.`);
+      setActiveMailAccount(normalizedEmail);
+      return;
+    }
+
+    setError("Open Simple Track from the Chrome extension to switch connected mail accounts without another Google login.");
   }
 
   if (isConnectPage) {
@@ -461,16 +462,14 @@ function App() {
             </button>
             <div className="profile-wrap">
               <button className="profile-button" type="button" onClick={() => setProfileOpen(!profileOpen)}>
-                {user?.photoURL ? <img src={user.photoURL} alt="" referrerPolicy="no-referrer" /> : <span>{getInitials(user)}</span>}
+                {selectedProfileAccount?.photoURL ? <img src={selectedProfileAccount.photoURL} alt="" referrerPolicy="no-referrer" /> : <span>{getInitials(selectedProfileAccount || user)}</span>}
               </button>
               {profileOpen ? (
           <ProfileMenu
                   user={user}
                   accounts={enrichedProfileAccounts}
-                  requestedAccountEmail={routeParams.accountEmail}
                   activeMailAccount={activeMailAccount}
                   onSwitchAccount={switchMailAccount}
-                  onConnectAccount={connectMailAccount}
                   onChangeLogin={changeAppLogin}
                   onOpenSettings={openSettingsPage}
                   onClose={() => setProfileOpen(false)}
@@ -662,29 +661,27 @@ function MicrosoftLogo() {
 function ProfileMenu({
   user,
   accounts = [],
-  requestedAccountEmail = "",
   activeMailAccount,
   onSwitchAccount,
-  onConnectAccount,
   onChangeLogin,
   onOpenSettings,
   onClose,
   onLogout
 }) {
   const mailAccounts = useMemo(
-    () => buildProfileMailAccounts(accounts, requestedAccountEmail),
-    [accounts, requestedAccountEmail]
+    () => buildProfileMailAccounts(accounts),
+    [accounts]
   );
   const selectedAccount = useMemo(
     () => getSelectedProfileAccount(mailAccounts, activeMailAccount, user),
     [mailAccounts, activeMailAccount, user]
   );
-  const firstName = (user?.displayName || user?.email || "there").split(/\s+|@/).filter(Boolean)[0];
+  const firstName = (selectedAccount?.displayName || user?.displayName || user?.email || "there").split(/\s+|@/).filter(Boolean)[0];
 
   return (
     <div className="profile-menu account-popout">
       <div className="account-popout-top">
-        <span>{user?.email}</span>
+        <span>{selectedAccount?.email || user?.email}</span>
         <button className="icon-button" type="button" onClick={onClose} aria-label="Close account menu">
           <X size={18} />
         </button>
@@ -695,43 +692,15 @@ function ProfileMenu({
         <button className="outline-button" type="button" onClick={onOpenSettings}>Manage Simple Track account</button>
       </div>
       <div className="account-popout-list">
-        <button
-          className={activeMailAccount === "all" ? "mail-account-row is-active" : "mail-account-row"}
-          type="button"
-          onClick={() => onSwitchAccount("all")}
-          aria-label="Show all accounts"
-        >
-          <span className="mail-account-avatar all">ST</span>
-          <span className="mail-account-copy">
-            <strong>All connected accounts</strong>
-            <small>Combined tracking view</small>
-          </span>
-          <span className="account-state">{activeMailAccount === "all" ? "Active" : "Switch"}</span>
-        </button>
         {mailAccounts.map((account) => (
           <MailAccountRow
             key={account.email}
             account={account}
             active={normalizeAccountEmail(activeMailAccount) === account.email}
             onSwitchAccount={onSwitchAccount}
-            onConnectAccount={onConnectAccount}
             onChangeLogin={onChangeLogin}
           />
         ))}
-        <button className="mail-account-row action-row" type="button" onClick={() => onConnectAccount("")}>
-          <span className="mail-account-avatar add"><Plus size={20} /></span>
-          <span className="mail-account-copy">
-            <strong>Add another mail account</strong>
-            <small>Open Gmail, then connect from the extension</small>
-          </span>
-        </button>
-        <button className="mail-account-row action-row" type="button" onClick={() => onChangeLogin("")}>
-          <span className="mail-account-avatar neutral"><Users size={18} /></span>
-          <span className="mail-account-copy">
-            <strong>Change app login</strong>
-            <small>Switch the Simple Track web session</small>
-          </span>
-        </button>
         <button className="mail-account-row action-row" type="button" onClick={onLogout}>
           <span className="mail-account-avatar neutral"><LogOut size={18} /></span>
           <span className="mail-account-copy">
@@ -740,12 +709,12 @@ function ProfileMenu({
           </span>
         </button>
       </div>
-      <p className="account-popout-note">Accounts connected in this browser can appear here; switch login to view that account's workspace.</p>
+      <p className="account-popout-note">Only mail accounts connected to this Simple Track session appear here.</p>
     </div>
   );
 }
 
-function MailAccountRow({ account, active, onSwitchAccount, onConnectAccount, onChangeLogin }) {
+function MailAccountRow({ account, active, onSwitchAccount, onChangeLogin }) {
   const connected = account.status === "connected";
   const browserConnected = account.status === "browser_connected";
   const needsLoginSwitch = account.status === "login_required";
@@ -770,10 +739,6 @@ function MailAccountRow({ account, active, onSwitchAccount, onConnectAccount, on
       onClick={() => {
         if (connected) {
           onSwitchAccount(account.email);
-          return;
-        }
-        if (browserConnected || needsLoginSwitch) {
-          onChangeLogin(account.email);
           return;
         }
         onChangeLogin(account.email);
@@ -824,24 +789,12 @@ function getAccountProviderType(account) {
   return "google";
 }
 
-function buildProfileMailAccounts(accounts, requestedAccountEmail = "") {
+function buildProfileMailAccounts(accounts) {
   const byEmail = new Map();
   for (const account of accounts) {
     const normalized = normalizeAccountRecord(account);
     if (!normalized) continue;
     byEmail.set(normalized.email, normalized);
-  }
-
-  const requestedEmail = normalizeAccountEmail(requestedAccountEmail);
-  if (requestedEmail && !byEmail.has(requestedEmail)) {
-    byEmail.set(requestedEmail, {
-      email: requestedEmail,
-      displayName: requestedEmail,
-      photoURL: "",
-      client: "Gmail",
-      provider: "google",
-      status: "login_required"
-    });
   }
 
   return [...byEmail.values()].sort((a, b) => {
@@ -928,6 +881,11 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
   const [message, setMessage] = useState("");
   const [connectedAccount, setConnectedAccount] = useState(null);
   const requestedEmail = params.accountEmail || "";
+  const signedInEmail = normalizeAccountEmail(user?.email);
+  const hasWrongSignedInAccount = Boolean(user && requestedEmail && signedInEmail !== requestedEmail);
+  const accountMismatchMessage = hasWrongSignedInAccount
+    ? `Signed in as ${user.email}. Switch to ${requestedEmail} before connecting this Gmail account.`
+    : "";
 
   async function continueWithGoogle() {
     setStatus("signing-in");
@@ -936,6 +894,8 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
     try {
       if (!user) {
         await login("google", requestedEmail);
+      } else if (hasWrongSignedInAccount) {
+        await chooseAnotherAccount();
       } else {
         await connectSignedInUser();
       }
@@ -947,13 +907,24 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
 
   useEffect(() => {
     if (!user || status !== "signing-in") return;
+    if (hasWrongSignedInAccount) {
+      setStatus("wrong-account");
+      setMessage(accountMismatchMessage);
+      return;
+    }
     connectSignedInUser();
-  }, [user, status]);
+  }, [user, status, hasWrongSignedInAccount, accountMismatchMessage]);
 
   async function connectSignedInUser() {
     if (!params.installId || !params.installSecret || !requestedEmail) {
       setStatus("failed");
       setMessage("The extension connection link is missing required details. Return to Gmail and click Enable again.");
+      return;
+    }
+
+    if (hasWrongSignedInAccount) {
+      setStatus("wrong-account");
+      setMessage(accountMismatchMessage);
       return;
     }
 
@@ -979,10 +950,10 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
 
   async function chooseAnotherAccount() {
     if (user) await logout();
-    setStatus("idle");
     setMessage("");
-    await login("google", requestedEmail);
+    setError("");
     setStatus("signing-in");
+    await login("google", requestedEmail);
   }
 
   function useHarnessAccount() {
@@ -993,6 +964,10 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
   const isBusy = status === "signing-in" || status === "connecting";
   const isConnected = status === "connected";
   const isFailed = status === "failed";
+  const visibleMessage = message || error || accountMismatchMessage;
+  const primaryActionText = hasWrongSignedInAccount
+    ? `Switch to ${requestedEmail}`
+    : user ? "Connect this Gmail" : "Continue to Google";
 
   return (
     <main className="connect-page">
@@ -1016,15 +991,15 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
         </div>
 
         {user ? (
-          <div className="signed-in-strip">
+          <div className={hasWrongSignedInAccount ? "signed-in-strip warning" : "signed-in-strip"}>
             <UserRound size={18} />
             <span>Signed in as <strong>{user.email}</strong></span>
           </div>
         ) : null}
 
-        {message || error ? (
+        {visibleMessage ? (
           <div className={isConnected ? "success-banner" : "error-banner compact"}>
-            {message || error}
+            {visibleMessage}
           </div>
         ) : null}
 
@@ -1032,7 +1007,7 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
           {!isConnected ? (
             <button type="button" onClick={continueWithGoogle} disabled={!authReady || isBusy}>
               {isBusy ? <Loader2 className="spin" size={18} /> : <GoogleLogo />}
-              {user ? "Connect this Gmail" : "Continue to Google"}
+              {primaryActionText}
             </button>
           ) : (
             <a className="connect-done-button" href="https://mail.google.com/">Return to Gmail</a>

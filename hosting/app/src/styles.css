@@ -1475,6 +1475,12 @@ input[type="checkbox"]:checked::after {
   font-size: 13px;
 }
 
+.signed-in-strip.warning {
+  color: #7a271a;
+  background: #fff4db;
+  border-color: #f4c56f;
+}
+
 .success-banner {
   padding: 12px 14px;
   color: #075e44;

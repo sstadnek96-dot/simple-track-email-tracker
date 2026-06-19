@@ -568,6 +568,9 @@ async function createWebAppSession(message = {}) {
 }
 
 async function disconnectAccount(message = {}) {
+  const settings = await getSettings();
+  const installId = await getInstallId();
+  const installSecret = await getInstallSecret();
   const accountEmail = normalizeEmail(message.accountEmail || (await getActiveAccountEmail()));
   const currentAccounts = await getConnectedAccounts();
   const currentActiveEmail = await getActiveAccountEmail();
@@ -576,6 +579,27 @@ async function disconnectAccount(message = {}) {
     return {
       ok: false,
       error: "No mail account was selected to log out."
+    };
+  }
+
+  if (settings.backendBaseUrl && installId && installSecret) {
+    const response = await fetch(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/app/extension-disconnect`, {
+      method: "POST",
+      headers: getBackendHeaders(settings, installSecret),
+      body: JSON.stringify({ installId, accountEmail })
+    });
+    const body = await response.json().catch(() => null);
+
+    if (!response.ok || !body?.ok) {
+      throw new Error(body?.error || `Account disconnect failed (${response.status})`);
+    }
+
+    const saved = await setConnectedAccounts(body.connectedAccounts || [], body.activeAccountEmail || "");
+    return {
+      ok: true,
+      ...body,
+      ...saved,
+      accountStatus: body.accountStatus || getAccountStatus(accountEmail, saved.connectedAccounts)
     };
   }
 

@@ -9,10 +9,16 @@ import { mockBootstrap, mockDashboard } from "../hosting/app/src/mockData.js";
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const appUrl = "http://127.0.0.1:4173/?harness=1";
 const connectUrl = "http://127.0.0.1:4173/connect-extension?harness=1#installId=harness-install&installSecret=harness-secret&accountEmail=s.stadnek96@gmail.com&client=Gmail";
+const connectMismatchUrl = "http://127.0.0.1:4173/connect-extension?harness=1&mismatch=1#installId=harness-install&installSecret=harness-secret&accountEmail=spencer.tpp@gmail.com&client=Gmail";
 const apiBase = "https://us-central1-simple-track-prod.cloudfunctions.net/api";
 const extensionContext = Buffer.from(JSON.stringify({
   installId: "harness-install",
   activeAccountEmail: "s.stadnek96@gmail.com",
+  handoffAccountEmail: "s.stadnek96@gmail.com",
+  handoffTokens: {
+    "s.stadnek96@gmail.com": "harness-token-s",
+    "spencer.tpp@gmail.com": "harness-token-tpp"
+  },
   connectedAccounts: [
     {
       email: "s.stadnek96@gmail.com",
@@ -238,15 +244,19 @@ async function runBrowserChecks() {
     await page.waitForSelector("text=Signed intake package");
     assert.equal(await page.getByText("Question About Lawncare").count(), 0, "selected account should hide the first account's messages");
     await page.locator(".profile-button").click();
-    await page.getByRole("button", { name: "Show all accounts" }).click();
+    await page.getByRole("button", { name: "Switch to s.stadnek96@gmail.com" }).click();
     await page.waitForSelector("text=Question About Lawncare");
 
     await page.goto(`${appUrl}&page=activity&accountEmail=s.stadnek96@gmail.com#stContext=${extensionContext}`);
     await page.waitForSelector(".auth-modal");
     await page.getByRole("button", { name: /Use harness account/i }).click();
     await page.locator(".profile-button").click();
+    const profileMenu = page.locator(".profile-menu");
     await page.waitForSelector("text=spencer.tpp@gmail.com");
     await page.waitForSelector("text=connected in this browser");
+    assert.equal(await profileMenu.getByText("All connected accounts").count(), 0, "profile menu should not show the combined accounts row");
+    assert.equal(await profileMenu.getByText("Add another mail account").count(), 0, "profile menu should not show add-account shortcut");
+    assert.equal(await profileMenu.getByText("Change app login").count(), 0, "profile menu should not show app-login shortcut");
     assert.equal(
       await page.getByRole("button", { name: "Switch app login to spencer.tpp@gmail.com" }).count(),
       1,
@@ -295,6 +305,13 @@ async function runBrowserChecks() {
     await page.getByRole("button", { name: /Use harness account/i }).click();
     await page.waitForSelector("h1:text('Gmail connected')");
     await page.waitForSelector("text=without access keys");
+
+    await page.goto(connectMismatchUrl);
+    await page.waitForSelector("h1:text('Connect Gmail')");
+    await page.getByRole("button", { name: /Use harness account/i }).click();
+    await page.waitForSelector("text=Signed in as s.stadnek96@gmail.com");
+    await page.waitForSelector("text=Switch to spencer.tpp@gmail.com");
+    assert.equal(await page.getByText("Gmail connected").count(), 0, "wrong signed-in account must not connect the requested Gmail");
   } finally {
     await browser.close();
   }

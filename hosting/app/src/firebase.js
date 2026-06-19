@@ -16,5 +16,9 @@ export const auth = getAuth(firebaseApp);
 export const googleProvider = new GoogleAuthProvider();
 export const microsoftProvider = new OAuthProvider("microsoft.com");
 
+googleProvider.addScope("profile");
+googleProvider.addScope("email");
 googleProvider.setCustomParameters({ prompt: "select_account" });
+microsoftProvider.addScope("profile");
+microsoftProvider.addScope("email");
 microsoftProvider.setCustomParameters({ prompt: "select_account" });
