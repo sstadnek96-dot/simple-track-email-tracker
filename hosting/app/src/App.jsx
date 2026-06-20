@@ -512,7 +512,7 @@ function App() {
     }
   }
 
-  async function login(providerName, loginHint = "") {
+  async function login(providerName, loginHint = "", options = {}) {
     setError("");
     try {
       const provider = providerName === "microsoft" ? microsoftProvider : googleProvider;
@@ -522,9 +522,13 @@ function App() {
       });
       const result = await signInWithPopup(auth, provider);
       const photoURL = await getLoginProfilePhoto(result, providerName);
-      setUser(toUser(result.user, photoURL));
+      const nextUser = toUser(result.user, photoURL);
+      setUser(nextUser);
+      return nextUser;
     } catch (loginError) {
       setError(loginError.message);
+      if (options.rethrow) throw loginError;
+      return null;
     }
   }
 
@@ -599,6 +603,24 @@ function App() {
 
     return firstSuccessfulExtensionResponse([
       requestExtensionBridge("simpleTrack:disconnectAccount", payload),
+      requestExtensionExternal(payload)
+    ]);
+  }
+
+  function requestExtensionStartAccountConnection(accountEmail = "", account = {}) {
+    const normalizedEmail = normalizeAccountEmail(accountEmail);
+    if (!normalizedEmail) return Promise.resolve(null);
+    const accountRecord = normalizeAccountRecord({ ...account, email: normalizedEmail }) || { email: normalizedEmail };
+    const payload = {
+      type: "simpleTrack:startAccountConnection",
+      accountEmail: normalizedEmail,
+      client: accountRecord.client || getMailClientLabel(accountRecord),
+      returnUrl: "",
+      openOnly: true
+    };
+
+    return firstSuccessfulExtensionResponse([
+      requestExtensionBridge("simpleTrack:startAccountConnection", payload),
       requestExtensionExternal(payload)
     ]);
   }
@@ -695,12 +717,19 @@ function App() {
     });
   }
 
-  function loginHarness() {
+  function loginHarness(overrides = {}) {
     setError("");
-    setUser(createHarnessUser());
+    const baseUser = createHarnessUser();
+    const overrideEmail = normalizeAccountEmail(overrides.email);
+    const harnessUser = {
+      ...baseUser,
+      ...overrides,
+      email: overrideEmail || overrides.email || baseUser.email
+    };
+    setUser(harnessUser);
     setBootstrap(mockBootstrap);
     setData(mockDashboard);
-    setActiveMailAccount(routeParams.accountEmail || mockDashboard.connectedAccounts?.[0]?.email || "all");
+    setActiveMailAccount(routeParams.accountEmail || overrideEmail || mockDashboard.connectedAccounts?.[0]?.email || "all");
     if (routeParams.focusedMessageId) {
       setActivePage("email");
       setFocusedMessageId(routeParams.focusedMessageId);
@@ -818,11 +847,23 @@ function App() {
     setProfileOpen(false);
   }
 
-  function changeAppLogin(accountEmail = "") {
+  async function changeAppLogin(accountOrEmail = "") {
     setProfileOpen(false);
-    const normalizedEmail = normalizeAccountEmail(accountEmail);
+    setError("");
+    const account = typeof accountOrEmail === "object" && accountOrEmail
+      ? accountOrEmail
+      : { email: accountOrEmail };
+    const normalizedEmail = normalizeAccountEmail(account.email);
 
     if (normalizedEmail) {
+      if (account.status === "login_required") {
+        const response = await requestExtensionStartAccountConnection(normalizedEmail, account);
+        if (!response?.ok) {
+          await login(getAccountProviderType(account), normalizedEmail);
+        }
+        return;
+      }
+
       setActiveMailAccount(normalizedEmail);
       signInToMailAccount(normalizedEmail);
       return;
@@ -1170,7 +1211,7 @@ function MailAccountRow({ account, active, onSwitchAccount, onChangeLogin }) {
           onSwitchAccount(account.email);
           return;
         }
-        onChangeLogin(account.email);
+        onChangeLogin(account);
       }}
       aria-label={needsLoginSwitch ? `Log back in to ${account.email}` : connected || browserConnected ? `Switch to ${account.email}` : `Connect ${account.email}`}
     >
@@ -1401,11 +1442,18 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
     setError("");
     setMessage("");
     try {
-      if (!user) {
-        await login(mailProvider, requestedEmail);
-      } else {
-        await connectSignedInUser();
+      if (isReconnect) {
+        if (user) await logout();
+        await login(mailProvider, requestedEmail, { rethrow: true });
+        return;
       }
+
+      if (!user) {
+        await login(mailProvider, requestedEmail, { rethrow: true });
+        return;
+      }
+
+      await connectSignedInUser();
     } catch (connectError) {
       setStatus("failed");
       setMessage(connectError.message);
@@ -1421,6 +1469,12 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
     if (!params.installId || !params.installSecret || !requestedEmail) {
       setStatus("failed");
       setMessage(`The extension connection link is missing required details. Return to ${mailClientLabel} and click Enable again.`);
+      return;
+    }
+
+    if (isReconnect && requestedEmail && !accountMatchesWebLogin) {
+      setStatus("failed");
+      setMessage(`Sign in with ${requestedEmail} to re-enable tracking for this ${mailClientLabel} account.`);
       return;
     }
 
@@ -1453,7 +1507,11 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
   }
 
   function useHarnessAccount() {
-    loginHarness();
+    const normalizedEmail = normalizeAccountEmail(requestedEmail);
+    loginHarness({
+      email: normalizedEmail || undefined,
+      displayName: normalizedEmail ? normalizedEmail.split("@")[0] : undefined
+    });
     setStatus("signing-in");
   }
 
@@ -1461,9 +1519,9 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
   const isConnected = status === "connected";
   const isFailed = status === "failed";
   const visibleMessage = message || error;
-  const primaryActionText = user
-    ? isReconnect ? `Reconnect ${mailClientLabel}` : `Connect this ${mailClientLabel}`
-    : isReconnect ? `Log back in with ${mailClientLabel}` : `Continue with ${mailClientLabel}`;
+  const primaryActionText = isReconnect
+    ? `Log back in with ${mailClientLabel}`
+    : user ? `Connect this ${mailClientLabel}` : `Continue with ${mailClientLabel}`;
 
   useEffect(() => {
     if (!isConnected || allowHarness || params.source !== "chrome-extension") return undefined;
@@ -1720,7 +1778,7 @@ function MessageDetailDialog({ message, onClose }) {
               <EventIcon type={event.type} />
               <div>
                 <strong>{messageEventTitle(event)}</strong>
-                <span>{formatDate(event.createdAt)} - {event.device || "Unknown device"} - {event.location || "Unknown location"}</span>
+                <span>{formatDate(event.createdAt)}</span>
               </div>
             </article>
           )) : (
@@ -1762,7 +1820,6 @@ function LinkClicks({ links }) {
             link.subject,
             <div>
               <strong>{formatDate(link.clickedAt)}</strong>
-              <span>{link.device || "Unknown device"}</span>
             </div>
           ])}
         />
@@ -2021,12 +2078,6 @@ function SettingsPage({ data, setData, getToken, bootstrap }) {
         {tab === "privacy" ? (
           <div className="settings-section">
             <h2>Privacy</h2>
-            <Toggle
-              label="Privacy mode"
-              text="Hide detailed device and location values in app surfaces where possible."
-              checked={settings.privacyMode}
-              onChange={(value) => saveSettings({ ...settings, privacyMode: value })}
-            />
             <label className="field-row">
               Retention days
               <input

@@ -112,6 +112,6 @@ function readForm() {
     backendBaseUrl: form.elements.backendBaseUrl.value.trim(),
     trackClicks: form.elements.trackClicks.checked,
     retentionDays: Number(form.elements.retentionDays.value || DEFAULT_SETTINGS.retentionDays),
-    privacyMode: form.elements.privacyMode.checked
+    privacyMode: Boolean(form.elements.privacyMode?.checked)
   };
 }

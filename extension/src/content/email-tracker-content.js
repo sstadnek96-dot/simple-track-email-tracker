@@ -28,6 +28,8 @@
   const BACKGROUND_STATE_REFRESH_MS = 30000;
   const HOVER_STATE_REFRESH_MS = 1500;
   const REALTIME_HEALTH_REFRESH_MS = 5 * 60 * 1000;
+  const SEND_ACTIVATION_FALLBACK_MS = 350;
+  const TRANSPARENT_PIXEL_SRC = "data:image/gif;base64,R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==";
   const DOCUMENT_EXTENSION_PATTERN = /\.(pdf|docx?|xlsx?|pptx?|csv|rtf|txt|pages|numbers|key)(?:$|[?#])/i;
   const DOCUMENT_LABEL_PATTERN = /\.(pdf|docx?|xlsx?|pptx?|csv|rtf|txt|pages|numbers|key)\b/i;
 
@@ -53,6 +55,7 @@
   let lastHoverStateRefreshAt = 0;
   let lastLocation = location.href;
   let dismissedAccountPromptEmail = "";
+  let extensionContextInvalidated = false;
 
   init();
 
@@ -91,48 +94,64 @@
     });
 
     if (globalThis.chrome?.storage?.onChanged) {
-      chrome.storage.onChanged.addListener((changes, areaName) => {
-        if (areaName !== "local") return;
-        if (changes["simpleTrack.messages"] || changes["simpleTrack.settings"] || changes["simpleTrack.connectedAccounts"] || changes["simpleTrack.knownAccounts"]) {
-          if (Array.isArray(changes["simpleTrack.messages"]?.newValue)) {
-            cachedMessages = mergeMessageList(cachedMessages, changes["simpleTrack.messages"].newValue);
+      try {
+        chrome.storage.onChanged.addListener((changes, areaName) => {
+          if (areaName !== "local" || extensionContextInvalidated) return;
+          if (changes["simpleTrack.messages"] || changes["simpleTrack.settings"] || changes["simpleTrack.connectedAccounts"] || changes["simpleTrack.knownAccounts"] || changes["simpleTrack.activeAccountEmail"]) {
+            if (Array.isArray(changes["simpleTrack.messages"]?.newValue)) {
+              cachedMessages = mergeMessageList(cachedMessages, changes["simpleTrack.messages"].newValue);
+            }
+            if (changes["simpleTrack.settings"]?.newValue) {
+              cachedSettings = changes["simpleTrack.settings"].newValue;
+            }
+            if (Array.isArray(changes["simpleTrack.connectedAccounts"]?.newValue)) {
+              connectedAccounts = changes["simpleTrack.connectedAccounts"].newValue;
+              accountStatus = getLocalAccountStatus(activeAccountEmail);
+            }
+            if (Array.isArray(changes["simpleTrack.knownAccounts"]?.newValue)) {
+              knownAccounts = changes["simpleTrack.knownAccounts"].newValue;
+              accountStatus = getLocalAccountStatus(activeAccountEmail);
+            }
+            if (changes["simpleTrack.activeAccountEmail"]?.newValue) {
+              activeAccountEmail = normalizeEmail(changes["simpleTrack.activeAccountEmail"].newValue);
+              accountStatus = getLocalAccountStatus(activeAccountEmail);
+            }
+            queueDecorate();
           }
-          if (changes["simpleTrack.settings"]?.newValue) {
-            cachedSettings = changes["simpleTrack.settings"].newValue;
-          }
-          if (Array.isArray(changes["simpleTrack.connectedAccounts"]?.newValue)) {
-            connectedAccounts = changes["simpleTrack.connectedAccounts"].newValue;
-            accountStatus = getLocalAccountStatus(activeAccountEmail);
-          }
-          if (Array.isArray(changes["simpleTrack.knownAccounts"]?.newValue)) {
-            knownAccounts = changes["simpleTrack.knownAccounts"].newValue;
-            accountStatus = getLocalAccountStatus(activeAccountEmail);
-          }
-          queueDecorate();
+        });
+      } catch (error) {
+        if (!handleStaleExtensionContext(error)) {
+          console.warn("Simple Track storage listener failed", getErrorMessage(error));
         }
-      });
+      }
     }
 
     if (globalThis.chrome?.runtime?.onMessage) {
-      chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-        if (message?.type !== "simpleTrack:detectAccount") return false;
+      try {
+        chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+          if (message?.type !== "simpleTrack:detectAccount") return false;
 
-        try {
-          refreshDetectedAccount();
-          const accountEmail = activeAccountEmail || detectCurrentMailAccountEmail();
-          sendResponse({
-            ok: true,
-            accountEmail,
-            client: getClientName(),
-            returnUrl: location.href,
-            accountStatus: getLocalAccountStatus(accountEmail)
-          });
-        } catch (error) {
-          sendResponse({ ok: false, error: error.message });
+          try {
+            refreshDetectedAccount();
+            const accountEmail = activeAccountEmail || detectCurrentMailAccountEmail();
+            sendResponse({
+              ok: true,
+              accountEmail,
+              client: getClientName(),
+              returnUrl: location.href,
+              accountStatus: getLocalAccountStatus(accountEmail)
+            });
+          } catch (error) {
+            sendResponse({ ok: false, error: getErrorMessage(error) });
+          }
+
+          return false;
+        });
+      } catch (error) {
+        if (!handleStaleExtensionContext(error)) {
+          console.warn("Simple Track runtime listener failed", getErrorMessage(error));
         }
-
-        return false;
-      });
+      }
     }
 
     scheduleStateRefresh(ACTIVE_STATE_REFRESH_MS);
@@ -143,6 +162,7 @@
     const response = await sendMessage({
       type: "simpleTrack:getState",
       accountEmail: detectedEmail,
+      includeAllAccounts: !detectedEmail,
       client: getClientName()
     });
     if (!response?.ok) return;
@@ -182,7 +202,9 @@
           applyRealtimeMessage(payload.message);
         }
       } catch (error) {
-        console.warn("Simple Track realtime event was not readable", error);
+        if (!handleStaleExtensionContext(error)) {
+          console.warn("Simple Track realtime event was not readable", getErrorMessage(error));
+        }
       }
     });
     realtimeSource.addEventListener("stream-error", () => {
@@ -221,6 +243,8 @@
   }
 
   function scheduleStateRefresh(delay = getStateRefreshDelay()) {
+    if (extensionContextInvalidated) return;
+
     if (stateRefreshTimer) {
       window.clearTimeout(stateRefreshTimer);
       stateRefreshTimer = null;
@@ -234,6 +258,8 @@
   }
 
   async function refreshStateAndDecorate() {
+    if (extensionContextInvalidated) return;
+
     if (lastLocation !== location.href) {
       lastLocation = location.href;
       hideHoverCard();
@@ -543,7 +569,13 @@
               injectTrackingAssets(composeRoot, response.tracking);
             }
           } catch (error) {
-            console.warn("Simple Track could not prepare tracking before send", error);
+            if (!handleStaleExtensionContext(error)) {
+              console.warn("Simple Track could not prepare tracking before send", getErrorMessage(error));
+            }
+          }
+
+          if (trackingResponse?.tracking?.activationUrl) {
+            armTrackingAssets(composeRoot);
           }
 
           sendButton.dataset.simpleTrackPrepared = "true";
@@ -571,7 +603,7 @@
       activateTrackedMessage(response);
     };
 
-    window.setTimeout(activateOnce, 350);
+    window.setTimeout(activateOnce, SEND_ACTIVATION_FALLBACK_MS);
 
     waitForSendCompletion(composeRoot, sendButton).then((didSend) => {
       if (didSend) activateOnce();
@@ -616,7 +648,9 @@
         refreshState().then(queueDecorate);
       }
     }).catch((error) => {
-      console.warn("Simple Track could not activate tracking after send", error);
+      if (!handleStaleExtensionContext(error)) {
+        console.warn("Simple Track could not activate tracking after send", getErrorMessage(error));
+      }
     });
   }
 
@@ -1306,10 +1340,6 @@
 
     detail.append(createDetail("Last activity", formatDateTime(message.lastActivityAt) || "Not opened yet"));
 
-    if (!cachedSettings.privacyMode) {
-      detail.append(createDetail("Device", message.device || "Pending"));
-    }
-
     fragment.append(title, status, grid, detail);
     return fragment;
   }
@@ -1401,16 +1431,17 @@
     if (!body.querySelector("img[data-simple-track-pixel='true']")) {
       insertHtmlIntoComposeBody(
         body,
-        `<br><img src="${escapeAttribute(tracking.pixelUrl)}" width="1" height="1" alt="" data-simple-track-pixel="true" style="border:0;width:1px;height:1px;">`
+        `<br><img src="${TRANSPARENT_PIXEL_SRC}" data-simple-track-src="${escapeAttribute(tracking.pixelUrl)}" width="1" height="1" alt="" data-simple-track-pixel="true" style="border:0;width:1px;height:1px;">`
       );
 
       if (!body.querySelector("img[data-simple-track-pixel='true']")) {
         const pixel = document.createElement("img");
-        pixel.src = tracking.pixelUrl;
+        pixel.src = TRANSPARENT_PIXEL_SRC;
         pixel.width = 1;
         pixel.height = 1;
         pixel.alt = "";
         pixel.dataset.simpleTrackPixel = "true";
+        pixel.dataset.simpleTrackSrc = tracking.pixelUrl;
         pixel.style.border = "0";
         pixel.style.width = "1px";
         pixel.style.height = "1px";
@@ -1420,6 +1451,20 @@
 
     if (cachedSettings.trackClicks !== false && tracking.clickPrefix) {
       wrapComposeLinks(body, tracking.clickPrefix);
+    }
+
+    notifyComposeBodyChanged(body);
+  }
+
+  function armTrackingAssets(composeRoot) {
+    const body = findComposeBody(composeRoot);
+    if (!body) return;
+
+    for (const pixel of body.querySelectorAll("img[data-simple-track-pixel='true'][data-simple-track-src]")) {
+      const trackingSrc = pixel.dataset.simpleTrackSrc;
+      if (trackingSrc && pixel.getAttribute("src") !== trackingSrc) {
+        pixel.setAttribute("src", trackingSrc);
+      }
     }
 
     notifyComposeBodyChanged(body);
@@ -1561,7 +1606,12 @@
 
   function getProviderLogoUrl(clientName) {
     const provider = String(clientName || "").toLowerCase().includes("outlook") ? "outlook" : "gmail";
-    return chrome.runtime.getURL(`assets/provider/${provider}.svg`);
+    try {
+      return chrome.runtime.getURL(`assets/provider/${provider}.svg`);
+    } catch (error) {
+      handleStaleExtensionContext(error);
+      return "";
+    }
   }
 
   function isMailClientPage() {
@@ -1685,13 +1735,37 @@
   }
 
   async function sendMessage(message) {
-    if (!globalThis.chrome?.runtime?.sendMessage) return null;
+    if (extensionContextInvalidated || !globalThis.chrome?.runtime?.sendMessage) return null;
 
     try {
       return await chrome.runtime.sendMessage(message);
     } catch (error) {
-      console.warn("Simple Track content script message failed", error);
+      if (!handleStaleExtensionContext(error)) {
+        console.warn("Simple Track content script message failed", getErrorMessage(error));
+      }
       return null;
     }
+  }
+
+  function handleStaleExtensionContext(error) {
+    if (!isExtensionContextInvalidatedError(error)) return false;
+
+    extensionContextInvalidated = true;
+    closeRealtimeStream();
+
+    if (stateRefreshTimer) {
+      window.clearTimeout(stateRefreshTimer);
+      stateRefreshTimer = null;
+    }
+
+    return true;
+  }
+
+  function isExtensionContextInvalidatedError(error) {
+    return /extension context invalidated/i.test(getErrorMessage(error));
+  }
+
+  function getErrorMessage(error) {
+    return String(error?.message || error || "");
   }
 })();

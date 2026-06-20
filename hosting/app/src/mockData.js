@@ -10,30 +10,22 @@ const baseMessages = [
     clicks: 2,
     attachmentOpens: 0,
     status: "clicked",
-    device: "Edge on Windows",
-    location: "Regina, SK",
     events: [
       {
         type: "open",
-        createdAt: "2026-05-23T14:38:20.000Z",
-        device: "Edge on Windows",
-        location: "Regina, SK"
+        createdAt: "2026-05-23T14:38:20.000Z"
       },
       {
         type: "click",
         label: "simpletrack.app/pricing",
         url: "https://simpletrack.app/pricing",
-        createdAt: "2026-05-23T14:41:00.000Z",
-        device: "Edge on Windows",
-        location: "Regina, SK"
+        createdAt: "2026-05-23T14:41:00.000Z"
       },
       {
         type: "click",
         label: "simpletrack.app/demo",
         url: "https://simpletrack.app/demo",
-        createdAt: "2026-05-23T14:42:00.000Z",
-        device: "Edge on Windows",
-        location: "Regina, SK"
+        createdAt: "2026-05-23T14:42:00.000Z"
       }
     ]
   },
@@ -48,23 +40,17 @@ const baseMessages = [
     clicks: 0,
     attachmentOpens: 1,
     status: "opened",
-    device: "Chrome on Windows",
-    location: "Saskatoon, SK",
     events: [
       {
         type: "open",
-        createdAt: "2026-05-20T00:14:00.000Z",
-        device: "Chrome on Windows",
-        location: "Saskatoon, SK"
+        createdAt: "2026-05-20T00:14:00.000Z"
       },
       {
         type: "attachment_open",
         kind: "pdf",
         label: "lawncare-pricing.pdf",
         url: "https://simpletrack.app/file/lawncare-pricing.pdf",
-        createdAt: "2026-05-20T00:16:00.000Z",
-        device: "Chrome on Windows",
-        location: "Saskatoon, SK"
+        createdAt: "2026-05-20T00:16:00.000Z"
       }
     ]
   },
@@ -79,22 +65,16 @@ const baseMessages = [
     clicks: 1,
     attachmentOpens: 0,
     status: "clicked",
-    device: "Safari on macOS",
-    location: "Calgary, AB",
     events: [
       {
         type: "open",
-        createdAt: "2026-05-18T20:03:00.000Z",
-        device: "Safari on macOS",
-        location: "Calgary, AB"
+        createdAt: "2026-05-18T20:03:00.000Z"
       },
       {
         type: "click",
         label: "Proposal portal",
         url: "https://simpletrack.app/proposal",
-        createdAt: "2026-05-18T20:10:00.000Z",
-        device: "Safari on macOS",
-        location: "Calgary, AB"
+        createdAt: "2026-05-18T20:10:00.000Z"
       }
     ]
   },
@@ -109,8 +89,6 @@ const baseMessages = [
     clicks: 0,
     attachmentOpens: 0,
     status: "sent",
-    device: null,
-    location: null,
     events: []
   }
 ];
@@ -139,8 +117,6 @@ function activityFromMessages(messages) {
       accountEmail: message.accountEmail,
       label: event.label,
       url: event.url,
-      device: event.device,
-      location: event.location,
       createdAt: event.createdAt,
       messageId: message.id
     })))
@@ -160,9 +136,7 @@ function linksFromMessages(messages) {
         url: event.url || "",
         type: event.type,
         kind: event.kind || "link",
-        clickedAt: event.createdAt,
-        device: event.device,
-        location: event.location
+        clickedAt: event.createdAt
       })))
     .sort((a, b) => new Date(b.clickedAt).getTime() - new Date(a.clickedAt).getTime());
 }

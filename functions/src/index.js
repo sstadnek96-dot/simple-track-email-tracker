@@ -1354,8 +1354,8 @@ async function exportOrgCsv(context, req, res) {
 function getCsvRows(type, messages, files, contacts) {
   if (type === "link-clicks") {
     return [
-      ["Recipient", "Subject", "Label", "URL", "Type", "Clicked At", "Device", "Location"],
-      ...buildLinkClickReport(messages).map((row) => [row.recipient, row.subject, row.label, row.url, row.type, row.clickedAt, row.device, row.location])
+      ["Recipient", "Subject", "Label", "URL", "Type", "Clicked At"],
+      ...buildLinkClickReport(messages).map((row) => [row.recipient, row.subject, row.label, row.url, row.type, row.clickedAt])
     ];
   }
 
@@ -1704,12 +1704,15 @@ function getStoredRecentEvents(data) {
 
 function isCountableEvent(message, event) {
   if (!event || event.ignored) return false;
+  if (event.type === "open" && isGmailPrefetchBot(event)) return false;
   if (event.type === "open") return !isSenderDirectOpen(message, event);
   if (event.type === "click" || event.type === "attachment_open") return true;
   return false;
 }
 
 function getEventIgnoreReason(message, event, eventType, eventTime) {
+  if (eventType === "open" && isGmailPrefetchBot(event)) return "gmail_prefetch_bot";
+
   if (eventType === "open" && isSenderDirectOpen(message, event)) return "sender_direct_open";
 
   if (eventType === "open") {
@@ -1747,6 +1750,16 @@ function isKnownImageProxy(userAgent) {
     value.includes("google image proxy") ||
     value.includes("microsoft outlook") ||
     value.includes("microsoft office");
+}
+
+function isGmailPrefetchBot(event) {
+  const userAgent = String(event?.userAgent || "").toLowerCase();
+  const referer = String(event?.referer || "").toLowerCase();
+  const hasKnownPrefetchUserAgent = userAgent.includes("chrome/42.0.2311.135") &&
+    userAgent.includes("edge/12.246") &&
+    userAgent.endsWith("mozilla/5.0");
+
+  return hasKnownPrefetchUserAgent && (!referer || referer === "http://mail.google.com/");
 }
 
 function isWithinGracePeriod(message, eventTime, gracePeriodMs) {

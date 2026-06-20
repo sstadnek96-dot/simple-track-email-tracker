@@ -154,7 +154,9 @@ async function handleMessage(message) {
     const pairing = await getPairing();
     let connectedAccounts = await getConnectedAccounts();
     let knownAccounts = await getKnownAccounts();
-    const activeAccountEmail = normalizeEmail(message.accountEmail || (await getActiveAccountEmail()));
+    const requestedAccountEmail = normalizeEmail(message.accountEmail);
+    const includeAllAccounts = Boolean(message.includeAllAccounts && !requestedAccountEmail);
+    const activeAccountEmail = normalizeEmail(requestedAccountEmail || (await getActiveAccountEmail()));
     let accountStatus = getAccountStatus(activeAccountEmail, connectedAccounts, knownAccounts);
     let syncError = null;
     let messages = [];
@@ -172,10 +174,18 @@ async function handleMessage(message) {
     }
 
     try {
-      messages = await getMessages({ settings, syncBackend: true, accountEmail: activeAccountEmail });
+      messages = await getMessages({
+        settings,
+        syncBackend: true,
+        accountEmail: includeAllAccounts ? "" : activeAccountEmail
+      });
     } catch (error) {
       syncError = error.message;
-      messages = await getMessages({ settings, syncBackend: false, accountEmail: activeAccountEmail });
+      messages = await getMessages({
+        settings,
+        syncBackend: false,
+        accountEmail: includeAllAccounts ? "" : activeAccountEmail
+      });
     }
 
     return {
@@ -215,6 +225,10 @@ async function handleMessage(message) {
 
   if (message.type === "simpleTrack:refreshAccountConnection") {
     return refreshAccountConnection(message);
+  }
+
+  if (message.type === "simpleTrack:selectAccount") {
+    return selectAccount(message);
   }
 
   if (message.type === "simpleTrack:createWebAppSession") {
@@ -633,6 +647,14 @@ async function startAccountConnection(message) {
     await chrome.windows.create({ url: connectUrl, type: "popup", width: 920, height: 760 });
   }
 
+  if (message.openOnly) {
+    return {
+      ok: true,
+      connectUrl,
+      accountStatus
+    };
+  }
+
   const status = await pollInstallConnection(settings, installId, installSecret, accountEmail);
   return {
     ok: status.accountStatus?.status === "connected",
@@ -650,6 +672,37 @@ async function refreshAccountConnection(message = {}) {
 
   await saveInstallAccountState(status, accountEmail);
   return { ok: true, ...status };
+}
+
+async function selectAccount(message = {}) {
+  const accountEmail = normalizeEmail(message.accountEmail);
+  const connectedAccounts = await getConnectedAccounts();
+  const knownAccounts = await getKnownAccounts();
+  const accountStatus = getAccountStatus(accountEmail, connectedAccounts, knownAccounts);
+
+  if (!accountEmail) {
+    return { ok: false, error: "Choose a connected mail account." };
+  }
+
+  if (accountStatus.status !== "connected") {
+    return {
+      ok: false,
+      error: `${accountEmail} is not connected to Simple Track.`,
+      connectedAccounts,
+      knownAccounts,
+      activeAccountEmail: await getActiveAccountEmail(),
+      accountStatus
+    };
+  }
+
+  await chrome.storage.local.set({ [STORAGE_KEYS.activeAccountEmail]: accountEmail });
+  return {
+    ok: true,
+    connectedAccounts,
+    knownAccounts,
+    activeAccountEmail: accountEmail,
+    accountStatus
+  };
 }
 
 async function createWebAppSession(message = {}) {
@@ -864,7 +917,7 @@ async function refreshBackendMessages(settings = null, currentMessages = null, o
     .filter((message) => !deletedIds.has(message.id));
 
   await chrome.storage.local.set({ [STORAGE_KEYS.messages]: mergedMessages });
-  notifyForNewOpens(localMessages, mergedMessages, activeSettings);
+  await notifyForNewOpens(localMessages, mergedMessages, activeSettings);
 
   return mergedMessages;
 }
@@ -956,11 +1009,11 @@ async function simulateTrackingActivity() {
   await chrome.storage.local.set({ [STORAGE_KEYS.messages]: updated });
 
   if (settings.notificationsEnabled && !updated[nextIndex].muted) {
-    createNotification(updated[nextIndex]);
+    await createNotification(updated[nextIndex]);
   }
 }
 
-function notifyForNewOpens(previousMessages, nextMessages, settings) {
+async function notifyForNewOpens(previousMessages, nextMessages, settings) {
   if (!settings.notificationsEnabled) return;
 
   const previousById = new Map(previousMessages.map((message) => [message.id, message]));
@@ -968,22 +1021,56 @@ function notifyForNewOpens(previousMessages, nextMessages, settings) {
     const previousMessage = previousById.get(nextMessage.id);
     if (!previousMessage) continue;
     if (previousMessage.opens === 0 && nextMessage.opens > 0 && !nextMessage.muted) {
-      createNotification(nextMessage);
+      await createNotification(nextMessage);
     }
   }
 }
 
-function createNotification(message) {
-  const iconUrl = chrome.runtime.getURL("assets/icons/icon-128.png");
-  chrome.notifications.create(`simple-track-open-${message.id}-${message.opens}`, {
+async function createNotification(message) {
+  if (!chrome.notifications?.create) return false;
+
+  const notificationId = `simple-track-open-${message.id}-${message.opens}`;
+  const baseOptions = {
     type: "basic",
-    iconUrl,
     title: "Email opened",
-    message: message.subject
-  }, () => {
-    const error = chrome.runtime.lastError;
-    if (error) {
-      console.warn("Simple Track notification could not be displayed", error.message);
+    message: message.subject || "A tracked email was opened"
+  };
+  const iconUrls = [
+    chrome.runtime.getURL("assets/icons/icon-48.png"),
+    chrome.runtime.getURL("assets/icons/icon-128.png")
+  ];
+
+  for (const iconUrl of iconUrls) {
+    const result = await tryCreateNotification(notificationId, { ...baseOptions, iconUrl });
+    if (result.ok) return true;
+  }
+
+  console.warn("Simple Track notification could not be displayed: unable to load packaged notification icon.");
+  return false;
+}
+
+function tryCreateNotification(notificationId, options) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    try {
+      const maybePromise = chrome.notifications.create(notificationId, options, () => {
+        const error = chrome.runtime.lastError;
+        finish(error ? { ok: false, error } : { ok: true });
+      });
+
+      if (maybePromise && typeof maybePromise.then === "function") {
+        maybePromise
+          .then(() => finish({ ok: true }))
+          .catch((error) => finish({ ok: false, error }));
+      }
+    } catch (error) {
+      finish({ ok: false, error });
     }
   });
 }

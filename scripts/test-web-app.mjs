@@ -165,6 +165,20 @@ async function runBrowserChecks() {
                 return;
               }
 
+              if (message?.type === "simpleTrack:startAccountConnection") {
+                callback({
+                  ok: true,
+                  connectUrl: `https://simple-track-prod-app.web.app/connect-extension#accountEmail=${encodeURIComponent(message.accountEmail)}&mode=reconnect`,
+                  accountStatus: {
+                    status: "login_required",
+                    accountEmail: message.accountEmail,
+                    connectedAccounts,
+                    knownAccounts: connectedAccounts
+                  }
+                });
+                return;
+              }
+
               if (message?.type === "simpleTrack:getConnectedAccounts") {
                 callback({
                   ok: true,
@@ -374,7 +388,10 @@ async function runBrowserChecks() {
       1,
       "signed-out account should stay in the web app account menu as a login-required row"
     );
-    await page.getByLabel("Close account menu").click();
+    await page.getByRole("button", { name: "Log back in to spencer.tpp@gmail.com" }).click();
+    await page.waitForFunction(() => (
+      window.__simpleTrackExternalRequests || []
+    ).some((request) => request.type === "simpleTrack:startAccountConnection" && request.accountEmail === "spencer.tpp@gmail.com"));
 
     await page.getByRole("button", { name: "Email tracking" }).first().click();
     await page.waitForSelector("h1:text('Email tracking')");
@@ -454,13 +471,22 @@ async function runBrowserChecks() {
       "Gmail connection should return to the exact Gmail account URL"
     );
 
+    await page.goto(appUrl);
+    await page.evaluate(() => {
+      window.localStorage.clear();
+      window.sessionStorage.clear();
+    });
     await page.goto(reconnectUrl);
     await page.waitForSelector("h1:text('Reconnect Gmail')");
     assert.equal(await page.getByText("Signed in to Simple Track as").count(), 0, "reconnect page should not show confusing signed-in identity copy");
+    assert.equal(
+      await page.getByRole("button", { name: /Log back in with Gmail/i }).count(),
+      1,
+      "reconnect page should force provider SSO instead of silent reconnect"
+    );
     if (await page.getByRole("button", { name: /Use harness account/i }).count()) {
       await page.getByRole("button", { name: /Use harness account/i }).click();
     }
-    await page.getByRole("button", { name: /Reconnect Gmail|Log back in with Gmail/i }).click();
     await page.waitForSelector("h1:text('Gmail connected')");
 
     await page.goto(connectOutlookUrl);

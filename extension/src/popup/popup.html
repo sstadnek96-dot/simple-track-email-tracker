@@ -33,6 +33,18 @@
         </div>
       </section>
 
+      <section class="account-switcher" id="accountSwitcher" hidden>
+        <button class="account-switcher-trigger" id="accountSwitcherTrigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+          <span class="account-switcher-avatar" id="accountSwitcherAvatar">ST</span>
+          <span class="account-switcher-copy">
+            <small>Viewing</small>
+            <strong id="accountSwitcherLabel">Connected account</strong>
+          </span>
+          <span class="account-switcher-caret" aria-hidden="true"></span>
+        </button>
+        <div class="account-switcher-menu" id="accountSwitcherMenu" role="listbox" aria-label="Connected mail accounts"></div>
+      </section>
+
       <div class="toolbar">
         <label class="search-box">
           <span class="search-icon" aria-hidden="true"></span>
@@ -93,14 +105,6 @@
             <div>
               <dt>Last activity</dt>
               <dd class="last-activity"></dd>
-            </div>
-            <div>
-              <dt>Device</dt>
-              <dd class="device"></dd>
-            </div>
-            <div>
-              <dt>Location</dt>
-              <dd class="location"></dd>
             </div>
           </dl>
           <div class="report-actions">

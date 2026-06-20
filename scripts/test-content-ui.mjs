@@ -11,6 +11,8 @@ try {
   await testUnconnectedGmailAccountShowsEnablePrompt();
   await testKnownGmailAccountShowsLoginPrompt();
   await testPopupCanDetectActiveMailAccount();
+  await testInvalidatedExtensionContextIsQuiet();
+  await testTrackingArmsPixelAndActivatesQuickly();
   await testDuplicateSubjectsMapToDistinctRows();
   await testBadgeDoesNotRegressFromStaleStorage();
   await testPendingMessagesDoNotBindToRows();
@@ -97,6 +99,68 @@ async function testPopupCanDetectActiveMailAccount() {
   await page.close();
 }
 
+async function testInvalidatedExtensionContextIsQuiet() {
+  const page = await openGmailFixture([], "", {
+    activeAccountEmail: "s.stadnek96@gmail.com",
+    throwRuntimeInvalidated: true
+  });
+
+  await page.waitForTimeout(200);
+  const warnings = await page.evaluate(() => window.__simpleTrackWarnings || []);
+  const invalidatedWarnings = warnings.filter((warning) => (
+    warning.includes("Extension context invalidated") ||
+    warning.includes("content script message failed")
+  ));
+
+  if (invalidatedWarnings.length) {
+    throw new Error(`Invalidated extension context was reported as a visible warning:\n${invalidatedWarnings.join("\n")}`);
+  }
+
+  await page.close();
+}
+
+async function testTrackingArmsPixelAndActivatesQuickly() {
+  const page = await openGmailFixture([], "", {
+    activeAccountEmail: "s.stadnek96@gmail.com",
+    connectedAccounts: [{ email: "s.stadnek96@gmail.com", displayName: "Spencer Stadnek", provider: "google", client: "Gmail" }],
+    createTrackedMessageResponse: {
+      ok: true,
+      message: createMessage("m-new-send", "compose activation test", todayAt(12, 30), 0, null, null),
+      tracking: {
+        pixelUrl: "https://track.simple.test/pixel?m=m-new-send&t=test-token",
+        activationUrl: "https://track.simple.test/api/messages/activate?m=m-new-send&t=test-token"
+      }
+    },
+    activationResponse: {
+      ok: true,
+      message: createMessage("m-new-send", "compose activation test", todayAt(12, 30), 0, null, null)
+    },
+    extraHtml: `
+      <div role="dialog" aria-label="New Message" style="display:block;width:420px;height:260px;">
+        <input name="subjectbox" value="compose activation test" />
+        <span email="recipient@example.com">recipient@example.com</span>
+        <div aria-label="Message Body" contenteditable="true" style="display:block;min-height:80px;">Hello</div>
+        <div role="button" aria-label="Send" data-tooltip="Send" tabindex="0">Send</div>
+      </div>
+    `
+  });
+
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.waitForSelector("img[data-simple-track-pixel='true']");
+
+  const pixelState = await page.$eval("img[data-simple-track-pixel='true']", (pixel) => ({
+    src: pixel.getAttribute("src"),
+    trackingSrc: pixel.getAttribute("data-simple-track-src")
+  }));
+  if (!pixelState.src || pixelState.src !== pixelState.trackingSrc) {
+    throw new Error(`Tracking pixel was not armed before the send click:\n${JSON.stringify(pixelState, null, 2)}`);
+  }
+
+  await page.waitForFunction(() => window.__simpleTrackActivationCalls.length === 1, null, { timeout: 1200 });
+
+  await page.close();
+}
+
 async function testDuplicateSubjectsMapToDistinctRows() {
   const messages = [
     createMessage("m-new", "test", todayAt(12, 55), 0, null, null),
@@ -127,7 +191,7 @@ async function testDuplicateSubjectsMapToDistinctRows() {
   await page.locator(".simple-track-row-badge").nth(1).hover();
   await page.waitForFunction(() => document.querySelector(".simple-track-hover-card")?.innerText.includes("2 opens"));
   hoverText = await page.locator(".simple-track-hover-card").innerText();
-  if (!hoverText.includes("2 opens") || !hoverText.includes("Chrome on Windows")) {
+  if (!hoverText.includes("2 opens") || !hoverText.includes("20 Jun, 13:39")) {
     throw new Error(`Second hover card did not replace the first card:\n${hoverText}`);
   }
 
@@ -157,7 +221,7 @@ async function testDuplicateSubjectsMapToDistinctRows() {
   await page.mouse.move(overlayPoint.x, overlayPoint.y);
   await page.waitForFunction(() => document.querySelector(".simple-track-hover-card")?.innerText.includes("2 opens"));
   hoverText = await page.locator(".simple-track-hover-card").innerText();
-  if (!hoverText.includes("2 opens") || !hoverText.includes("Chrome on Windows")) {
+  if (!hoverText.includes("2 opens") || !hoverText.includes("20 Jun, 13:39")) {
     throw new Error(`Coordinate hover did not work through an overlay:\n${hoverText}`);
   }
 
@@ -242,6 +306,13 @@ async function openGmailFixture(messages, rowsHtml, options = {}) {
     window.__simpleTrackStorageListeners = [];
     window.__simpleTrackRuntimeListeners = [];
     window.__simpleTrackStartedConnection = "";
+    window.__simpleTrackActivationCalls = [];
+    window.__simpleTrackWarnings = [];
+    const originalWarn = console.warn.bind(console);
+    console.warn = (...args) => {
+      window.__simpleTrackWarnings.push(args.map((arg) => String(arg?.message || arg)).join(" "));
+      originalWarn(...args);
+    };
     window.chrome = {
       runtime: {
         getURL(path) {
@@ -253,6 +324,10 @@ async function openGmailFixture(messages, rowsHtml, options = {}) {
           }
         },
         sendMessage: async (message) => {
+          if (options.throwRuntimeInvalidated) {
+            throw new Error("Extension context invalidated.");
+          }
+
           if (message.type === "simpleTrack:getState") {
             const accountEmail = options.activeAccountEmail || "";
             return {
@@ -286,6 +361,14 @@ async function openGmailFixture(messages, rowsHtml, options = {}) {
             window.__simpleTrackStartedConnectionMessage = message;
             return options.connectionResponse || { ok: false, error: "No connection response" };
           }
+          if (message.type === "simpleTrack:createTrackedMessage") {
+            window.__simpleTrackCreatedMessage = message;
+            return options.createTrackedMessageResponse || { ok: false, error: "No create response" };
+          }
+          if (message.type === "simpleTrack:activateTrackedMessage") {
+            window.__simpleTrackActivationCalls.push(message);
+            return options.activationResponse || { ok: true };
+          }
           return { ok: true };
         }
       },
@@ -310,6 +393,7 @@ async function openGmailFixture(messages, rowsHtml, options = {}) {
     </style>
     <a aria-label="Google Account: Spencer (${options.activeAccountEmail || ""})" href="https://accounts.google.com/SignOutOptions">Account</a>
     <table><tbody>${rowsHtml}</tbody></table>
+    ${options.extraHtml || ""}
   `);
 
   await page.addStyleTag({ path: contentCssPath });

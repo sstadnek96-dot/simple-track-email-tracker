@@ -15,15 +15,11 @@ const fallbackState = {
         {
           type: "open",
           createdAt: "2026-05-18T18:44:14.000Z",
-          device: "Chrome on Windows",
-          location: "Saskatoon, SK",
           url: null
         },
         {
           type: "attachment_open",
           createdAt: "2026-05-18T18:46:08.000Z",
-          device: "Chrome on Windows",
-          location: "Saskatoon, SK",
           label: "Lawncare quote PDF",
           kind: "pdf",
           url: "https://example.com/lawncare"
@@ -35,6 +31,7 @@ const fallbackState = {
   settings: { trackingEnabled: true },
   summary: { sent: 1, opened: 1, unopened: 0, clicked: 0, attachmentOpened: 1, openRate: 100 },
   connectedAccounts: [],
+  knownAccounts: [],
   activeAccountEmail: "",
   accountStatus: { status: "unknown_account", accountEmail: "", connectedAccounts: [] },
   activeTabAccount: { accountEmail: "", client: "", isMailTab: false, detected: false }
@@ -50,6 +47,7 @@ let activeRealtimeUrl = null;
 let realtimeConnected = false;
 let lastFullStateRefreshAt = 0;
 let openMessageIds = new Set();
+let selectedPopupAccountEmail = "";
 
 const POPUP_REFRESH_MS = 2500;
 const REALTIME_HEALTH_REFRESH_MS = 5 * 60 * 1000;
@@ -63,6 +61,11 @@ const elements = {
   accountStatus: document.querySelector("#accountStatus"),
   connectAccount: document.querySelector("#connectAccount"),
   disconnectAccount: document.querySelector("#disconnectAccount"),
+  accountSwitcher: document.querySelector("#accountSwitcher"),
+  accountSwitcherTrigger: document.querySelector("#accountSwitcherTrigger"),
+  accountSwitcherAvatar: document.querySelector("#accountSwitcherAvatar"),
+  accountSwitcherLabel: document.querySelector("#accountSwitcherLabel"),
+  accountSwitcherMenu: document.querySelector("#accountSwitcherMenu"),
   activityList: document.querySelector("#activityList"),
   template: document.querySelector("#messageTemplate"),
   searchInput: document.querySelector("#searchInput"),
@@ -81,6 +84,21 @@ async function init() {
 
   elements.connectAccount.addEventListener("click", connectCurrentAccount);
   elements.disconnectAccount.addEventListener("click", disconnectCurrentAccount);
+  elements.accountSwitcherTrigger.addEventListener("click", () => {
+    toggleAccountSwitcherMenu();
+  });
+  elements.accountSwitcherMenu.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-email]");
+    if (!button) return;
+    switchPopupAccount(button.dataset.email);
+  });
+  document.addEventListener("click", (event) => {
+    if (elements.accountSwitcher.hidden || elements.accountSwitcher.contains(event.target)) return;
+    closeAccountSwitcherMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeAccountSwitcherMenu();
+  });
 
   elements.searchInput.addEventListener("input", (event) => {
     currentSearch = event.target.value.trim().toLowerCase();
@@ -120,16 +138,17 @@ async function init() {
   startPopupRefresh();
 }
 
-async function getState() {
+async function getState(accountEmailOverride = selectedPopupAccountEmail) {
   const activeTabAccount = await getActiveTabAccountContext();
+  const requestedAccountEmail = normalizeEmail(accountEmailOverride || activeTabAccount.accountEmail || "");
   const response = await sendMessage({
     type: "simpleTrack:getState",
-    accountEmail: activeTabAccount.accountEmail || "",
+    accountEmail: requestedAccountEmail,
     client: activeTabAccount.client || ""
   });
-  if (!response?.ok) return normalizePopupState(fallbackState, activeTabAccount);
+  if (!response?.ok) return normalizePopupState(fallbackState, activeTabAccount, requestedAccountEmail);
   lastFullStateRefreshAt = Date.now();
-  return normalizePopupState(response, activeTabAccount);
+  return normalizePopupState(response, activeTabAccount, requestedAccountEmail);
 }
 
 async function sendMessage(message) {
@@ -225,15 +244,20 @@ async function injectContentScript(tabId) {
   });
 }
 
-function normalizePopupState(response, activeTabAccount) {
+function normalizePopupState(response, activeTabAccount, requestedAccountEmail = "") {
   const connectedAccounts = Array.isArray(response.connectedAccounts) ? response.connectedAccounts : [];
   const knownAccounts = Array.isArray(response.knownAccounts) ? response.knownAccounts : connectedAccounts;
   const accountEmail = normalizeEmail(
+    requestedAccountEmail ||
+    selectedPopupAccountEmail ||
     activeTabAccount.accountEmail ||
     response.accountStatus?.accountEmail ||
     response.activeAccountEmail
   );
-  const accountStatus = response.accountStatus || activeTabAccount.accountStatus || getLocalAccountStatus(accountEmail, connectedAccounts, knownAccounts);
+  let accountStatus = response.accountStatus || activeTabAccount.accountStatus || getLocalAccountStatus(accountEmail, connectedAccounts, knownAccounts);
+  if (accountEmail && normalizeEmail(accountStatus.accountEmail) !== accountEmail) {
+    accountStatus = getLocalAccountStatus(accountEmail, connectedAccounts, knownAccounts);
+  }
 
   return {
     ...fallbackState,
@@ -353,6 +377,7 @@ function render() {
   elements.trackingToggle.checked = Boolean(settings.trackingEnabled);
 
   renderAccountPanel();
+  renderAccountSwitcher();
   renderMessages();
 }
 
@@ -399,6 +424,7 @@ function getCurrentPopupAccountEmail() {
   const activeTab = currentState.activeTabAccount || {};
 
   return normalizeEmail(
+    selectedPopupAccountEmail ||
     activeTab.accountEmail ||
     currentState.accountStatus?.accountEmail ||
     currentState.activeAccountEmail
@@ -407,7 +433,102 @@ function getCurrentPopupAccountEmail() {
 
 function getCurrentPopupAccountStatus() {
   const accountEmail = getCurrentPopupAccountEmail();
-  return currentState.accountStatus || getLocalAccountStatus(accountEmail, currentState.connectedAccounts || [], currentState.knownAccounts || []);
+  const status = currentState.accountStatus;
+  if (status && normalizeEmail(status.accountEmail) === accountEmail) return status;
+  return getLocalAccountStatus(accountEmail, currentState.connectedAccounts || [], currentState.knownAccounts || []);
+}
+
+function renderAccountSwitcher() {
+  const accounts = getConnectedAccountOptions();
+  const currentEmail = getCurrentPopupAccountEmail();
+  elements.accountSwitcher.hidden = accounts.length < 2;
+  elements.accountSwitcherMenu.replaceChildren();
+  if (accounts.length < 2) {
+    closeAccountSwitcherMenu();
+    return;
+  }
+
+  const selectedAccount = accounts.find((account) => account.email === currentEmail) || accounts[0];
+  renderSwitcherAvatar(elements.accountSwitcherAvatar, selectedAccount);
+  elements.accountSwitcherLabel.textContent = selectedAccount.email;
+  elements.accountSwitcherTrigger.disabled = accountActionBusy;
+  elements.accountSwitcherTrigger.setAttribute("aria-expanded", elements.accountSwitcher.classList.contains("is-open") ? "true" : "false");
+
+  for (const account of accounts) {
+    const button = document.createElement("button");
+    const isActive = account.email === currentEmail;
+    button.className = `account-switcher-option${isActive ? " is-active" : ""}`;
+    button.type = "button";
+    button.setAttribute("role", "option");
+    button.dataset.email = account.email;
+    button.disabled = accountActionBusy || isActive;
+    button.setAttribute("aria-selected", isActive ? "true" : "false");
+    button.setAttribute("aria-label", `${isActive ? "Viewing" : "Switch to"} ${account.email}`);
+
+    button.append(createSwitcherAvatar(account));
+
+    const label = document.createElement("span");
+    label.className = "account-switcher-label";
+    label.textContent = account.email;
+    button.append(label);
+
+    const state = document.createElement("span");
+    state.className = "account-switcher-state";
+    state.textContent = isActive ? "Active" : "";
+    button.append(state);
+    elements.accountSwitcherMenu.append(button);
+  }
+}
+
+function toggleAccountSwitcherMenu() {
+  if (elements.accountSwitcher.hidden || accountActionBusy) return;
+  const isOpen = elements.accountSwitcher.classList.toggle("is-open");
+  elements.accountSwitcherTrigger.setAttribute("aria-expanded", isOpen ? "true" : "false");
+}
+
+function closeAccountSwitcherMenu() {
+  elements.accountSwitcher.classList.remove("is-open");
+  elements.accountSwitcherTrigger.setAttribute("aria-expanded", "false");
+}
+
+function createSwitcherAvatar(account) {
+  const avatar = document.createElement("span");
+  avatar.className = "account-switcher-avatar";
+  renderSwitcherAvatar(avatar, account);
+  return avatar;
+}
+
+function renderSwitcherAvatar(avatar, account) {
+  const photoURL = account.photoURL || account.photoUrl || "";
+  avatar.replaceChildren();
+
+  if (photoURL) {
+    const image = document.createElement("img");
+    image.src = photoURL;
+    image.alt = "";
+    image.referrerPolicy = "no-referrer";
+    avatar.append(image);
+    return;
+  }
+
+  avatar.textContent = getAccountInitials(account.displayName || account.email);
+}
+
+function getConnectedAccountOptions() {
+  const byEmail = new Map();
+  for (const rawAccount of currentState.connectedAccounts || []) {
+    const email = normalizeEmail(rawAccount?.email);
+    if (!email) continue;
+    byEmail.set(email, {
+      email,
+      displayName: rawAccount.displayName || rawAccount.name || email,
+      photoURL: rawAccount.photoURL || rawAccount.photoUrl || "",
+      provider: rawAccount.provider || "google",
+      client: rawAccount.client || "Gmail",
+      status: "connected"
+    });
+  }
+  return [...byEmail.values()].sort((a, b) => a.email.localeCompare(b.email));
 }
 
 function getAccountStatusLabel(status, activeTab) {
@@ -451,12 +572,37 @@ function getAccountInitials(value) {
     .join("") || "ST";
 }
 
+async function switchPopupAccount(accountEmail) {
+  const normalizedEmail = normalizeEmail(accountEmail);
+  if (!normalizedEmail || normalizedEmail === getCurrentPopupAccountEmail()) return;
+
+  closeAccountSwitcherMenu();
+  selectedPopupAccountEmail = normalizedEmail;
+  accountActionBusy = true;
+  currentState = normalizePopupState({
+    ...currentState,
+    activeAccountEmail: normalizedEmail,
+    accountStatus: getLocalAccountStatus(normalizedEmail, currentState.connectedAccounts || [], currentState.knownAccounts || []),
+    messages: []
+  }, currentState.activeTabAccount || {}, normalizedEmail);
+  render();
+
+  try {
+    await sendMessage({ type: "simpleTrack:selectAccount", accountEmail: normalizedEmail });
+    currentState = await getState(normalizedEmail);
+    syncRealtimeStream(currentState.realtimeUrl);
+  } finally {
+    accountActionBusy = false;
+    render();
+  }
+}
+
 async function connectCurrentAccount() {
   const accountEmail = getCurrentPopupAccountEmail();
   if (!accountEmail) return;
 
   accountActionBusy = true;
-  renderAccountPanel();
+  render();
   try {
     const response = await sendMessage({
       type: "simpleTrack:startAccountConnection",
@@ -465,12 +611,14 @@ async function connectCurrentAccount() {
       returnUrl: currentState.activeTabAccount?.returnUrl || ""
     });
     if (response?.connectedAccounts) {
+      selectedPopupAccountEmail = accountEmail;
       currentState = normalizePopupState({
         ...currentState,
         connectedAccounts: response.connectedAccounts,
+        knownAccounts: response.knownAccounts || currentState.knownAccounts,
         activeAccountEmail: response.activeAccountEmail || accountEmail,
         accountStatus: response.accountStatus
-      }, currentState.activeTabAccount || {});
+      }, currentState.activeTabAccount || {}, accountEmail);
     }
     currentState = await getState();
     syncRealtimeStream(currentState.realtimeUrl);
@@ -485,16 +633,20 @@ async function disconnectCurrentAccount() {
   if (!accountEmail) return;
 
   accountActionBusy = true;
-  renderAccountPanel();
+  render();
   try {
     const response = await sendMessage({ type: "simpleTrack:disconnectAccount", accountEmail });
     if (response?.ok) {
+      if (selectedPopupAccountEmail === accountEmail) {
+        selectedPopupAccountEmail = normalizeEmail(response.activeAccountEmail || response.connectedAccounts?.[0]?.email || "");
+      }
       currentState = normalizePopupState({
         ...currentState,
         connectedAccounts: response.connectedAccounts || [],
+        knownAccounts: response.knownAccounts || currentState.knownAccounts,
         activeAccountEmail: response.activeAccountEmail || "",
         accountStatus: response.accountStatus
-      }, currentState.activeTabAccount || {});
+      }, currentState.activeTabAccount || {}, selectedPopupAccountEmail);
       syncRealtimeStream(currentState.realtimeUrl);
     }
   } finally {
@@ -554,8 +706,6 @@ function renderMessages() {
     node.querySelector(".status-value").textContent = status.shortLabel;
     node.querySelector(".subject").textContent = message.subject;
     node.querySelector(".last-activity").textContent = formatDetailedDate(message.lastActivityAt) || "Not opened yet";
-    node.querySelector(".device").textContent = message.device || "Pending";
-    node.querySelector(".location").textContent = message.location || "Unknown";
     renderEventTimeline(node, message);
 
     const muteButton = node.querySelector(".mute-button");
@@ -827,9 +977,7 @@ function renderEventTimeline(node, message) {
     title.textContent = getEventTitle(event);
 
     const meta = document.createElement("em");
-    meta.textContent = [formatDetailedDate(event.createdAt), event.device, event.location]
-      .filter(Boolean)
-      .join(" - ");
+    meta.textContent = formatDetailedDate(event.createdAt) || "";
 
     copy.append(title, meta);
     item.append(icon, copy);
