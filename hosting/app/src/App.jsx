@@ -49,6 +49,7 @@ const HOUR_LABELS = Array.from({ length: 24 }, (_, hour) => `${hour}:00`);
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const PROFILE_PHOTO_CACHE_KEY = "simpleTrack.profilePhotos";
 const EXTENSION_SESSION_CACHE_KEY = "simpleTrack.extensionSession";
+const ACTIVE_MAIL_ACCOUNT_CACHE_KEY = "simpleTrack.activeMailAccount";
 const EXTENSION_BRIDGE_TIMEOUT_MS = 2200;
 
 function harnessAllowed() {
@@ -230,6 +231,44 @@ function writeStoredExtensionContext(context) {
   }
 }
 
+function readStoredActiveMailAccount() {
+  if (typeof window === "undefined") return "";
+
+  try {
+    return normalizeAccountEmail(window.localStorage.getItem(ACTIVE_MAIL_ACCOUNT_CACHE_KEY) || "");
+  } catch {
+    return "";
+  }
+}
+
+function writeStoredActiveMailAccount(accountEmail = "") {
+  if (typeof window === "undefined") return;
+
+  try {
+    const normalizedEmail = normalizeAccountEmail(accountEmail);
+    if (!normalizedEmail || normalizedEmail === "all") {
+      window.localStorage.removeItem(ACTIVE_MAIL_ACCOUNT_CACHE_KEY);
+      return;
+    }
+    window.localStorage.setItem(ACTIVE_MAIL_ACCOUNT_CACHE_KEY, normalizedEmail);
+  } catch {
+    // The URL accountEmail parameter still preserves the active account when storage is unavailable.
+  }
+}
+
+function syncAccountEmailRoute(accountEmail = "") {
+  if (typeof window === "undefined" || !window.history?.replaceState) return;
+
+  const normalizedEmail = normalizeAccountEmail(accountEmail);
+  const url = new URL(window.location.href);
+  if (normalizedEmail && normalizedEmail !== "all") {
+    url.searchParams.set("accountEmail", normalizedEmail);
+  } else {
+    url.searchParams.delete("accountEmail");
+  }
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
 function decodeRouteContext(encoded) {
   if (!encoded) return null;
 
@@ -362,7 +401,7 @@ function App() {
   const [bootstrap, setBootstrap] = useState(null);
   const [data, setData] = useState(null);
   const [activePage, setActivePage] = useState(routeParams.activePage);
-  const [activeMailAccount, setActiveMailAccount] = useState(routeParams.accountEmail || "all");
+  const [activeMailAccount, setActiveMailAccount] = useState(routeParams.accountEmail || readStoredActiveMailAccount() || "all");
   const [focusedMessageId, setFocusedMessageId] = useState(routeParams.focusedMessageId);
   const [query, setQuery] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -406,6 +445,10 @@ function App() {
   }, [user]);
 
   useEffect(() => {
+    writeStoredActiveMailAccount(activeMailAccount);
+  }, [activeMailAccount]);
+
+  useEffect(() => {
     refreshExtensionAccountsFromBridge();
   }, []);
 
@@ -429,6 +472,7 @@ function App() {
 
       if (normalizeAccountEmail(activeMailAccount) === disconnectedEmail) {
         setActiveMailAccount(nextEmail);
+        syncAccountEmailRoute(nextEmail);
         refreshDashboardForAccount(nextEmail);
       }
     }
@@ -489,14 +533,15 @@ function App() {
     setLoading(true);
     setError("");
     try {
-      const dashboardAccount = getDashboardAccountParam(accountEmailOverride || routeParams.accountEmail || activeMailAccount);
+      const preferredAccount = accountEmailOverride || routeParams.accountEmail || readStoredActiveMailAccount() || activeMailAccount;
+      const dashboardAccount = getDashboardAccountParam(preferredAccount);
       const [boot, dashboard] = await Promise.all([
         fetchBootstrap(getToken),
         fetchDashboard(getToken, dashboardAccount)
       ]);
       setBootstrap(boot);
       setData(dashboard.data);
-      const firstAccount = routeParams.accountEmail || dashboard.data?.connectedAccounts?.[0]?.email || boot.connectedAccounts?.[0]?.email || "all";
+      const firstAccount = preferredAccount || dashboard.data?.connectedAccounts?.[0]?.email || boot.connectedAccounts?.[0]?.email || "all";
       setActiveMailAccount((current) => {
         const currentEmail = normalizeAccountEmail(current);
         return currentEmail && currentEmail !== "all" ? currentEmail : firstAccount;
@@ -764,6 +809,9 @@ function App() {
     setUser(null);
     setBootstrap(null);
     setData(null);
+    setActiveMailAccount("all");
+    writeStoredActiveMailAccount("");
+    syncAccountEmailRoute("");
     if (auth.currentUser) await signOut(auth);
   }
 
@@ -788,6 +836,7 @@ function App() {
 
     if (nextEmail) {
       setActiveMailAccount(nextEmail);
+      syncAccountEmailRoute(nextEmail);
       refreshDashboardForAccount(nextEmail);
       return;
     }
@@ -866,15 +915,21 @@ function App() {
     setActivePage("settings");
   }
 
-  async function switchMailAccount(accountEmail) {
+  async function selectMailAccount(accountEmail, options = {}) {
     const normalizedEmail = normalizeAccountEmail(accountEmail);
-    setActiveMailAccount(normalizedEmail || accountEmail);
-    setProfileOpen(false);
+    const nextAccount = normalizedEmail || "all";
+    setActiveMailAccount(nextAccount);
+    syncAccountEmailRoute(nextAccount);
+    if (options.closeProfile) setProfileOpen(false);
     const account = enrichedProfileAccounts.find((entry) => entry.email === normalizedEmail);
     if (account?.status === "browser_connected") {
       await signInToMailAccount(normalizedEmail);
     }
-    await refreshDashboardForAccount(normalizedEmail || accountEmail);
+    await refreshDashboardForAccount(nextAccount);
+  }
+
+  function switchMailAccount(accountEmail) {
+    selectMailAccount(accountEmail, { closeProfile: true });
   }
 
   async function changeAppLogin(accountOrEmail = "") {
@@ -895,6 +950,7 @@ function App() {
       }
 
       setActiveMailAccount(normalizedEmail);
+      syncAccountEmailRoute(normalizedEmail);
       signInToMailAccount(normalizedEmail);
       return;
     }
@@ -1218,8 +1274,10 @@ function MailAccountRow({ account, active, onSwitchAccount, onChangeLogin }) {
   const connected = account.status === "connected";
   const browserConnected = account.status === "browser_connected";
   const needsLoginSwitch = account.status === "login_required";
-  const label = connected
-    ? active ? "Active" : "Switch"
+  const label = active
+    ? "Active"
+    : connected
+      ? "Switch"
     : needsLoginSwitch ? "Log back in" : browserConnected ? "Switch" : "Connect";
   const secondaryText = browserConnected
     ? `${account.email} - tracking connected`
@@ -1243,7 +1301,7 @@ function MailAccountRow({ account, active, onSwitchAccount, onChangeLogin }) {
         }
         onChangeLogin(account);
       }}
-      aria-label={needsLoginSwitch ? `Log back in to ${account.email}` : connected || browserConnected ? `Switch to ${account.email}` : `Connect ${account.email}`}
+      aria-label={active ? `${account.email} is active` : needsLoginSwitch ? `Log back in to ${account.email}` : connected || browserConnected ? `Switch to ${account.email}` : `Connect ${account.email}`}
     >
       <AccountAvatar account={account} />
       <span className="mail-account-copy">

@@ -377,7 +377,19 @@ async function runBrowserChecks() {
       0,
       "switching an extension-connected account should not show the no-handoff error"
     );
+    assert.equal(
+      await page.evaluate(() => new URL(window.location.href).searchParams.get("accountEmail")),
+      "spencer.tpp@gmail.com",
+      "switching accounts should sync the accountEmail URL parameter"
+    );
+    assert.equal(
+      await page.evaluate(() => window.localStorage.getItem("simpleTrack.activeMailAccount")),
+      "spencer.tpp@gmail.com",
+      "switching accounts should persist the active mail account for refresh"
+    );
     await page.locator(".profile-button").click();
+    const activeAccountRowText = await page.locator(".mail-account-row.is-active").innerText();
+    assert.match(activeAccountRowText, /spencer\.tpp@gmail\.com[\s\S]*Active/, "switched account row should be marked active");
     await page.getByRole("button", { name: /Sign out/i }).click();
     await page.waitForFunction(() => (
       window.__simpleTrackExternalRequests || []
