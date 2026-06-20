@@ -637,6 +637,20 @@ async function connectExtensionAccount(context, req, res) {
         status: "connected"
       }
     },
+    knownAccounts: {
+      [accountEmail]: {
+        email: accountEmail,
+        displayName: accountDisplayName,
+        photoURL: accountPhotoURL,
+        orgId: context.org.id,
+        userUid: context.uid,
+        provider,
+        client,
+        connectedAt: now,
+        updatedAt: now,
+        status: "connected"
+      }
+    },
     updatedAt: now,
     createdAt: installSnapshot.exists ? (installSnapshot.data().createdAt || now) : now
   }, { merge: true });
@@ -734,12 +748,21 @@ async function disconnectExtensionAccount(req, res) {
     }
 
     const accounts = install.accounts && typeof install.accounts === "object" ? { ...install.accounts } : {};
+    const knownAccounts = install.knownAccounts && typeof install.knownAccounts === "object" ? { ...install.knownAccounts } : {};
     const removedAccount = accounts[accountEmail] || null;
     const orgAccountRef = removedAccount?.orgId
       ? db.collection(ORGS).doc(removedAccount.orgId).collection(MAIL_ACCOUNTS).doc(accountEmail)
       : null;
     const orgAccountSnapshot = orgAccountRef ? await transaction.get(orgAccountRef) : null;
     delete accounts[accountEmail];
+    if (removedAccount) {
+      knownAccounts[accountEmail] = {
+        ...removedAccount,
+        status: "login_required",
+        disconnectedAt: now,
+        updatedAt: now
+      };
+    }
 
     const remainingAccounts = Object.values(accounts).filter((account) => account?.email);
     const activeAccountEmail = install.activeAccountEmail === accountEmail
@@ -751,6 +774,7 @@ async function disconnectExtensionAccount(req, res) {
 
     transaction.update(installRef, {
       accounts,
+      knownAccounts,
       activeAccountEmail: safeActiveAccountEmail || "",
       updatedAt: now
     });
@@ -770,6 +794,7 @@ async function disconnectExtensionAccount(req, res) {
     nextInstall = {
       ...install,
       accounts,
+      knownAccounts,
       activeAccountEmail: safeActiveAccountEmail || "",
       updatedAt: now
     };
@@ -784,6 +809,7 @@ async function disconnectExtensionAccount(req, res) {
     installId,
     activeAccountEmail: nextInstall?.activeAccountEmail || "",
     connectedAccounts: getInstallConnectedAccounts(nextInstall),
+    knownAccounts: getInstallKnownAccounts(nextInstall),
     accountStatus: getAccountConnectionStatus(nextInstall, accountEmail)
   });
 }
@@ -807,15 +833,55 @@ async function getExtensionInstallStatus(req, res) {
   const selectedAccount = accountEmail
     ? connectedAccounts.find((account) => account.email === accountEmail)
     : null;
+  const inferredKnownAccount = accountEmail && !selectedAccount
+    ? await inferKnownInstallAccount(installId, accountEmail)
+    : null;
+  const effectiveInstall = inferredKnownAccount
+    ? {
+        ...install,
+        knownAccounts: {
+          ...(install.knownAccounts && typeof install.knownAccounts === "object" ? install.knownAccounts : {}),
+          [accountEmail]: inferredKnownAccount
+        }
+      }
+    : install;
 
   res.status(200).json({
     ok: true,
     installId,
     activeAccountEmail: install.activeAccountEmail || connectedAccounts[0]?.email || "",
     connectedAccounts,
-    accountStatus: getAccountConnectionStatus(install, accountEmail),
-    account: selectedAccount || null
+    knownAccounts: getInstallKnownAccounts(effectiveInstall),
+    accountStatus: getAccountConnectionStatus(effectiveInstall, accountEmail),
+    account: selectedAccount || inferredKnownAccount || null
   });
+}
+
+async function inferKnownInstallAccount(installId, accountEmail) {
+  const normalizedEmail = normalizeEmail(accountEmail);
+  if (!installId || !normalizedEmail) return null;
+
+  const snapshot = await db
+    .collection(TRACKED_MESSAGES)
+    .where("installId", "==", installId)
+    .limit(450)
+    .get();
+  const message = snapshot.docs
+    .map((doc) => doc.data())
+    .find((entry) => normalizeEmail(entry.accountEmail) === normalizedEmail);
+
+  if (!message) return null;
+
+  return {
+    email: normalizedEmail,
+    displayName: cleanString(message.accountDisplayName, 160) || normalizedEmail,
+    photoURL: cleanString(message.accountPhotoURL || message.accountPhotoUrl, 1000),
+    provider: cleanString(message.provider, 40) || (String(message.client || "").toLowerCase().includes("outlook") ? "microsoft" : "google"),
+    client: cleanString(message.client, 80) || "Gmail",
+    orgId: cleanString(message.orgId, 160),
+    status: "login_required",
+    updatedAt: message.updatedAt || message.lastActivityAt || message.sentAt || null
+  };
 }
 
 async function getOrgMessages(orgId) {
@@ -1316,6 +1382,32 @@ function getInstallConnectedAccounts(install) {
     .sort((a, b) => new Date(b.updatedAt || b.connectedAt || 0).getTime() - new Date(a.updatedAt || a.connectedAt || 0).getTime());
 }
 
+function getInstallKnownAccounts(install) {
+  const byEmail = new Map(getInstallConnectedAccounts(install).map((account) => [account.email, account]));
+  const knownAccounts = install?.knownAccounts && typeof install.knownAccounts === "object" ? install.knownAccounts : {};
+
+  for (const account of Object.values(knownAccounts)) {
+    const email = normalizeEmail(account?.email);
+    if (!email) continue;
+    const connected = byEmail.get(email);
+    byEmail.set(email, serializeTimestamps({
+      email,
+      displayName: cleanString(account.displayName, 160) || connected?.displayName || email,
+      photoURL: cleanString(account.photoURL || account.photoUrl, 1000) || connected?.photoURL || "",
+      provider: cleanString(account.provider, 40) || connected?.provider || "google",
+      client: cleanString(account.client, 80) || connected?.client || "Gmail",
+      orgId: cleanString(account.orgId, 160) || connected?.orgId || "",
+      status: connected ? "connected" : (cleanString(account.status, 40) || "login_required"),
+      connectedAt: account.connectedAt || connected?.connectedAt || null,
+      disconnectedAt: account.disconnectedAt || null,
+      updatedAt: account.updatedAt || connected?.updatedAt || null
+    }));
+  }
+
+  return [...byEmail.values()]
+    .sort((a, b) => new Date(b.updatedAt || b.connectedAt || 0).getTime() - new Date(a.updatedAt || a.connectedAt || 0).getTime());
+}
+
 function getConnectedAccount(install, accountEmail) {
   if (!install || !accountEmail) return null;
   const accounts = install.accounts && typeof install.accounts === "object" ? install.accounts : {};
@@ -1329,20 +1421,24 @@ function hasConnectedAccounts(install) {
 
 function getAccountConnectionStatus(install, accountEmail) {
   const connectedAccounts = getInstallConnectedAccounts(install);
+  const knownAccounts = getInstallKnownAccounts(install);
   if (!accountEmail) {
     return {
       status: connectedAccounts.length > 0 ? "connected_unknown_account" : "not_connected",
       accountEmail: "",
-      connectedAccounts
+      connectedAccounts,
+      knownAccounts
     };
   }
 
   const account = connectedAccounts.find((entry) => entry.email === accountEmail);
+  const knownAccount = knownAccounts.find((entry) => entry.email === accountEmail);
   return {
-    status: account ? "connected" : "not_connected",
+    status: account ? "connected" : knownAccount ? "login_required" : "not_connected",
     accountEmail,
     connectedAccounts,
-    account: account || null
+    knownAccounts,
+    account: account || knownAccount || null
   };
 }
 

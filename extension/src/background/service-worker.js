@@ -152,12 +152,24 @@ async function handleMessage(message) {
     const installId = await getInstallId();
     const installSecret = await getInstallSecret();
     const pairing = await getPairing();
-    const connectedAccounts = await getConnectedAccounts();
-    const knownAccounts = await getKnownAccounts();
+    let connectedAccounts = await getConnectedAccounts();
+    let knownAccounts = await getKnownAccounts();
     const activeAccountEmail = normalizeEmail(message.accountEmail || (await getActiveAccountEmail()));
-    const accountStatus = getAccountStatus(activeAccountEmail, connectedAccounts, knownAccounts);
+    let accountStatus = getAccountStatus(activeAccountEmail, connectedAccounts, knownAccounts);
     let syncError = null;
     let messages = [];
+
+    try {
+      if (settings.backendBaseUrl && installId && installSecret && activeAccountEmail) {
+        const status = await fetchInstallStatus(settings, installId, installSecret, activeAccountEmail);
+        const saved = await saveInstallAccountState(status, activeAccountEmail);
+        connectedAccounts = saved.connectedAccounts;
+        knownAccounts = saved.knownAccounts;
+        accountStatus = status.accountStatus || getAccountStatus(activeAccountEmail, connectedAccounts, knownAccounts);
+      }
+    } catch (error) {
+      syncError = error.message;
+    }
 
     try {
       messages = await getMessages({ settings, syncBackend: true, accountEmail: activeAccountEmail });
@@ -636,7 +648,7 @@ async function refreshAccountConnection(message = {}) {
   const accountEmail = normalizeEmail(message.accountEmail || (await getActiveAccountEmail()));
   const status = await fetchInstallStatus(settings, installId, installSecret, accountEmail);
 
-  await setConnectedAccounts(status.connectedAccounts || [], status.activeAccountEmail || accountEmail);
+  await saveInstallAccountState(status, accountEmail);
   return { ok: true, ...status };
 }
 
@@ -672,7 +684,7 @@ async function createWebAppSession(message = {}) {
   }
 
   if (body.connectedAccounts) {
-    await setConnectedAccounts(body.connectedAccounts, body.activeAccountEmail || accountEmail);
+    await saveInstallAccountState(body, accountEmail);
   }
 
   return body;
@@ -706,7 +718,7 @@ async function disconnectAccount(message = {}) {
       throw new Error(body?.error || `Account disconnect failed (${response.status})`);
     }
 
-    const saved = await setConnectedAccounts(body.connectedAccounts || [], body.activeAccountEmail || "");
+    const saved = await saveInstallAccountState(body, "");
     notifyWebAppAccountDisconnected(accountEmail, saved).catch((error) => {
       console.warn("Simple Track could not notify web app logout", error);
     });
@@ -733,6 +745,17 @@ async function disconnectAccount(message = {}) {
     ok: true,
     ...saved,
     accountStatus: getAccountStatus(accountEmail, saved.connectedAccounts, saved.knownAccounts)
+  };
+}
+
+async function saveInstallAccountState(status = {}, fallbackActiveAccountEmail = "") {
+  const saved = await setConnectedAccounts(status.connectedAccounts || [], status.activeAccountEmail || fallbackActiveAccountEmail);
+  const knownAccounts = status.knownAccounts
+    ? await rememberKnownAccounts(status.knownAccounts)
+    : saved.knownAccounts;
+  return {
+    ...saved,
+    knownAccounts
   };
 }
 
@@ -798,7 +821,7 @@ async function pollInstallConnection(settings, installId, installSecret, account
     await delay(attempt === 0 ? 1200 : CONNECTION_POLL_INTERVAL_MS);
     try {
       lastStatus = await fetchInstallStatus(settings, installId, installSecret, accountEmail);
-      await setConnectedAccounts(lastStatus.connectedAccounts || [], lastStatus.activeAccountEmail || accountEmail);
+      await saveInstallAccountState(lastStatus, accountEmail);
       if (lastStatus.accountStatus?.status === "connected") return lastStatus;
     } catch (error) {
       lastStatus = { ok: false, error: error.message };
