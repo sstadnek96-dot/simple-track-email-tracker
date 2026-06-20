@@ -115,6 +115,7 @@ async function runBrowserChecks() {
   const context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   const browserErrors = [];
+  const dashboardRequests = [];
 
   await page.addInitScript(() => {
     Object.defineProperty(window, "chrome", {
@@ -225,7 +226,9 @@ async function runBrowserChecks() {
     }
 
     if (path.endsWith("/dashboard")) {
-      await json(route, 200, { ok: true, data: mockDashboard });
+      const accountEmail = (url.searchParams.get("accountEmail") || "").toLowerCase();
+      dashboardRequests.push(accountEmail || "all");
+      await json(route, 200, { ok: true, data: dashboardForAccount(accountEmail) });
       return;
     }
 
@@ -368,9 +371,7 @@ async function runBrowserChecks() {
       "extension-connected account should be switchable from the web app profile menu"
     );
     await page.getByRole("button", { name: "Switch to spencer.tpp@gmail.com" }).click();
-    await page.waitForFunction(() => (
-      window.__simpleTrackExternalRequests || []
-    ).some((request) => request.accountEmail === "spencer.tpp@gmail.com"));
+    await waitForDashboardRequest(dashboardRequests, "spencer.tpp@gmail.com");
     assert.equal(
       await page.getByText("Open Simple Track from the Chrome extension").count(),
       0,
@@ -381,6 +382,7 @@ async function runBrowserChecks() {
     await page.waitForFunction(() => (
       window.__simpleTrackExternalRequests || []
     ).some((request) => request.type === "simpleTrack:disconnectAccount" && request.accountEmail === "spencer.tpp@gmail.com"));
+    await waitForDashboardRequest(dashboardRequests, "s.stadnek96@gmail.com");
     await page.waitForSelector("text=Question About Lawncare");
     await page.locator(".profile-button").click();
     assert.equal(
@@ -506,6 +508,35 @@ async function runBrowserChecks() {
   } finally {
     await browser.close();
   }
+}
+
+function dashboardForAccount(accountEmail = "") {
+  if (!accountEmail) return mockDashboard;
+
+  const messages = mockDashboard.messages.filter((message) => message.accountEmail === accountEmail);
+  const messageIds = new Set(messages.map((message) => message.id));
+
+  return {
+    ...mockDashboard,
+    messages,
+    activity: mockDashboard.activity.filter((item) => item.accountEmail === accountEmail || messageIds.has(item.messageId)),
+    links: mockDashboard.links.filter((item) => item.accountEmail === accountEmail || messageIds.has(item.messageId)),
+    contacts: mockDashboard.contacts.filter((contact) => (
+      messages.some((message) => (
+        (message.recipients || []).some((recipient) => recipient.toLowerCase().includes(contact.email))
+      ))
+    ))
+  };
+}
+
+async function waitForDashboardRequest(requests, accountEmail) {
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    if (requests.includes(accountEmail)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  throw new Error(`Expected dashboard request for ${accountEmail}; saw ${JSON.stringify(requests)}`);
 }
 
 async function json(route, status, body) {

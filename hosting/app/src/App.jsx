@@ -429,6 +429,7 @@ function App() {
 
       if (normalizeAccountEmail(activeMailAccount) === disconnectedEmail) {
         setActiveMailAccount(nextEmail);
+        refreshDashboardForAccount(nextEmail);
       }
     }
 
@@ -474,16 +475,24 @@ function App() {
   }, [authReady, extensionSessionContext, routeParams.accountEmail, user?.email]);
 
   async function getToken() {
+    if (auth.currentUser?.getIdToken) return auth.currentUser.getIdToken();
     return user?.getIdToken ? user.getIdToken() : "";
   }
 
-  async function loadWorkspace() {
+  function getDashboardAccountParam(accountEmail = "") {
+    const normalizedEmail = normalizeAccountEmail(accountEmail);
+    if (!normalizedEmail || normalizedEmail === "all") return "";
+    return normalizedEmail;
+  }
+
+  async function loadWorkspace(accountEmailOverride = "") {
     setLoading(true);
     setError("");
     try {
+      const dashboardAccount = getDashboardAccountParam(accountEmailOverride || routeParams.accountEmail || activeMailAccount);
       const [boot, dashboard] = await Promise.all([
         fetchBootstrap(getToken),
-        fetchDashboard(getToken)
+        fetchDashboard(getToken, dashboardAccount)
       ]);
       setBootstrap(boot);
       setData(dashboard.data);
@@ -509,6 +518,17 @@ function App() {
       }
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function refreshDashboardForAccount(accountEmail) {
+    const dashboardAccount = getDashboardAccountParam(accountEmail);
+    setError("");
+    try {
+      const dashboard = await fetchDashboard(getToken, dashboardAccount);
+      setData(dashboard.data);
+    } catch (refreshError) {
+      setError(refreshError.message);
     }
   }
 
@@ -549,10 +569,13 @@ function App() {
       }
 
       const result = await signInWithCustomToken(auth, customToken);
-      setUser(toUser(result.user));
+      const nextUser = toUser(result.user);
+      setUser(nextUser);
       if (accountEmail) setActiveMailAccount(normalizeAccountEmail(accountEmail));
+      return nextUser;
     } catch (sessionError) {
       setError(`Could not open ${accountEmail || "that account"} automatically. ${sessionError.message}`);
+      return null;
     }
   }
 
@@ -562,8 +585,7 @@ function App() {
 
     const existingToken = getHandoffToken(extensionSessionContext, normalizedEmail);
     if (existingToken) {
-      await signInFromExtensionHandoff(existingToken, normalizedEmail);
-      return;
+      return signInFromExtensionHandoff(existingToken, normalizedEmail);
     }
 
     const session = await requestExtensionWebAppSession(normalizedEmail);
@@ -574,9 +596,10 @@ function App() {
         handoffTokens: { [normalizedEmail]: session.customToken },
         connectedAccounts: session.connectedAccounts || []
       });
-      await signInFromExtensionHandoff(session.customToken, normalizedEmail);
-      return;
+      return signInFromExtensionHandoff(session.customToken, normalizedEmail);
     }
+
+    return null;
   }
 
   function requestExtensionWebAppSession(accountEmail = "") {
@@ -765,6 +788,7 @@ function App() {
 
     if (nextEmail) {
       setActiveMailAccount(nextEmail);
+      refreshDashboardForAccount(nextEmail);
       return;
     }
 
@@ -842,9 +866,15 @@ function App() {
     setActivePage("settings");
   }
 
-  function switchMailAccount(accountEmail) {
-    setActiveMailAccount(accountEmail);
+  async function switchMailAccount(accountEmail) {
+    const normalizedEmail = normalizeAccountEmail(accountEmail);
+    setActiveMailAccount(normalizedEmail || accountEmail);
     setProfileOpen(false);
+    const account = enrichedProfileAccounts.find((entry) => entry.email === normalizedEmail);
+    if (account?.status === "browser_connected") {
+      await signInToMailAccount(normalizedEmail);
+    }
+    await refreshDashboardForAccount(normalizedEmail || accountEmail);
   }
 
   async function changeAppLogin(accountOrEmail = "") {
@@ -1207,7 +1237,7 @@ function MailAccountRow({ account, active, onSwitchAccount, onChangeLogin }) {
       ].filter(Boolean).join(" ")}
       type="button"
       onClick={() => {
-        if (connected) {
+        if (connected || browserConnected) {
           onSwitchAccount(account.email);
           return;
         }

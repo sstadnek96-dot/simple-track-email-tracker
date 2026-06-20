@@ -26,8 +26,9 @@ export function fetchBootstrap(getToken) {
   return request("/app/bootstrap", { getToken });
 }
 
-export function fetchDashboard(getToken) {
-  return request("/app/dashboard", { getToken });
+export function fetchDashboard(getToken, accountEmail = "") {
+  const query = accountEmail ? `?accountEmail=${encodeURIComponent(accountEmail)}` : "";
+  return request(`/app/dashboard${query}`, { getToken });
 }
 
 export function createContact(getToken, contact) {

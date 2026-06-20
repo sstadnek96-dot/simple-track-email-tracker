@@ -27,6 +27,10 @@ const RATE_LIMITS = "rateLimits";
 const MAIL_ACCOUNTS = "mailAccounts";
 const OPEN_GRACE_PERIOD_MS = Number(process.env.SIMPLE_TRACK_OPEN_GRACE_PERIOD_MS || 0);
 const INTERACTION_GRACE_PERIOD_MS = Number(process.env.SIMPLE_TRACK_INTERACTION_GRACE_PERIOD_MS || 0);
+const APP_MESSAGE_LIMIT = Number(process.env.SIMPLE_TRACK_APP_MESSAGE_LIMIT || 500);
+const APP_ACCOUNT_MESSAGE_LIMIT = Number(process.env.SIMPLE_TRACK_APP_ACCOUNT_MESSAGE_LIMIT || 250);
+const EXTENSION_MESSAGE_LIMIT = Number(process.env.SIMPLE_TRACK_EXTENSION_MESSAGE_LIMIT || 250);
+const EXTENSION_STREAM_LIMIT = Number(process.env.SIMPLE_TRACK_EXTENSION_STREAM_LIMIT || 100);
 const TRANSPARENT_GIF = Buffer.from(
   "R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==",
   "base64"
@@ -253,14 +257,18 @@ async function listTrackedMessages(req, res) {
     return;
   }
 
-  const snapshot = await db
+  let query = db
     .collection(TRACKED_MESSAGES)
-    .where("installId", "==", installId)
-    .limit(100)
+    .where("installId", "==", installId);
+
+  if (accountEmail) query = query.where("accountEmail", "==", accountEmail);
+
+  const snapshot = await query
+    .orderBy("sentAt", "desc")
+    .limit(EXTENSION_MESSAGE_LIMIT)
     .get();
 
   const messages = (await Promise.all(snapshot.docs.map((doc) => serializeMessageWithEffectiveStats(doc))))
-    .filter((message) => !accountEmail || message.accountEmail === accountEmail)
     .sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
 
   res.status(200).json({ ok: true, messages });
@@ -317,10 +325,15 @@ function startTrackedEventStream(req, res, installId, accountEmail = "") {
     unsubscribe();
   };
 
-  unsubscribe = db
+  let query = db
     .collection(TRACKED_MESSAGES)
-    .where("installId", "==", installId)
-    .limit(100)
+    .where("installId", "==", installId);
+
+  if (accountEmail) query = query.where("accountEmail", "==", accountEmail);
+
+  unsubscribe = query
+    .orderBy("updatedAt", "desc")
+    .limit(EXTENSION_STREAM_LIMIT)
     .onSnapshot(
       async (snapshot) => {
         for (const change of snapshot.docChanges()) {
@@ -384,24 +397,26 @@ async function handleAppRequest(req, res, route) {
   }
 
   if (req.method === "GET" && appRoute === "/dashboard") {
-    res.status(200).json({ ok: true, data: await buildDashboardData(context) });
+    res.status(200).json({ ok: true, data: await buildDashboardData(context, {
+      accountEmail: normalizeEmail(req.query.accountEmail)
+    }) });
     return;
   }
 
   if (req.method === "GET" && appRoute === "/activity") {
-    const messages = await getOrgMessages(context.org.id);
+    const messages = await getOrgMessages(context.org.id, { accountEmail: normalizeEmail(req.query.accountEmail) });
     const files = await getOrgFiles(context.org.id);
     res.status(200).json({ ok: true, activity: buildActivityTimeline(messages, files) });
     return;
   }
 
   if (req.method === "GET" && appRoute === "/messages") {
-    res.status(200).json({ ok: true, messages: await getOrgMessages(context.org.id) });
+    res.status(200).json({ ok: true, messages: await getOrgMessages(context.org.id, { accountEmail: normalizeEmail(req.query.accountEmail) }) });
     return;
   }
 
   if (req.method === "GET" && appRoute === "/link-clicks") {
-    const messages = await getOrgMessages(context.org.id);
+    const messages = await getOrgMessages(context.org.id, { accountEmail: normalizeEmail(req.query.accountEmail) });
     res.status(200).json({ ok: true, links: buildLinkClickReport(messages) });
     return;
   }
@@ -412,14 +427,14 @@ async function handleAppRequest(req, res, route) {
   }
 
   if (req.method === "GET" && appRoute === "/performance") {
-    const messages = await getOrgMessages(context.org.id);
+    const messages = await getOrgMessages(context.org.id, { accountEmail: normalizeEmail(req.query.accountEmail) });
     const files = await getOrgFiles(context.org.id);
     res.status(200).json({ ok: true, performance: buildPerformanceReport(messages, files) });
     return;
   }
 
   if (req.method === "GET" && appRoute === "/contacts") {
-    const messages = await getOrgMessages(context.org.id);
+    const messages = await getOrgMessages(context.org.id, { accountEmail: normalizeEmail(req.query.accountEmail) });
     res.status(200).json({ ok: true, contacts: await buildContactsReport(context.org.id, messages) });
     return;
   }
@@ -546,8 +561,8 @@ async function ensureUserWorkspace(decoded) {
   };
 }
 
-async function buildDashboardData(context) {
-  const messages = await getOrgMessages(context.org.id);
+async function buildDashboardData(context, options = {}) {
+  const messages = await getOrgMessages(context.org.id, options);
   const files = await getOrgFiles(context.org.id);
   const contacts = await buildContactsReport(context.org.id, messages);
 
@@ -940,11 +955,18 @@ async function getKnownAuthAccount(accountEmail) {
   }
 }
 
-async function getOrgMessages(orgId) {
-  const snapshot = await db
+async function getOrgMessages(orgId, options = {}) {
+  const accountEmail = normalizeEmail(options.accountEmail);
+  const limit = accountEmail ? APP_ACCOUNT_MESSAGE_LIMIT : APP_MESSAGE_LIMIT;
+  let query = db
     .collection(TRACKED_MESSAGES)
-    .where("orgId", "==", orgId)
-    .limit(250)
+    .where("orgId", "==", orgId);
+
+  if (accountEmail) query = query.where("accountEmail", "==", accountEmail);
+
+  const snapshot = await query
+    .orderBy("sentAt", "desc")
+    .limit(limit)
     .get();
 
   return (await Promise.all(snapshot.docs.map((doc) => serializeMessageWithEffectiveStats(doc))))

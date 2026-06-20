@@ -1,4 +1,56 @@
 {
-  "indexes": [],
+  "indexes": [
+    {
+      "collectionGroup": "trackedMessages",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "orgId", "order": "ASCENDING" },
+        { "fieldPath": "sentAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "trackedMessages",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "orgId", "order": "ASCENDING" },
+        { "fieldPath": "accountEmail", "order": "ASCENDING" },
+        { "fieldPath": "sentAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "trackedMessages",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "installId", "order": "ASCENDING" },
+        { "fieldPath": "sentAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "trackedMessages",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "installId", "order": "ASCENDING" },
+        { "fieldPath": "accountEmail", "order": "ASCENDING" },
+        { "fieldPath": "sentAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "trackedMessages",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "installId", "order": "ASCENDING" },
+        { "fieldPath": "updatedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "trackedMessages",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "installId", "order": "ASCENDING" },
+        { "fieldPath": "accountEmail", "order": "ASCENDING" },
+        { "fieldPath": "updatedAt", "order": "DESCENDING" }
+      ]
+    }
+  ],
   "fieldOverrides": []
 }
