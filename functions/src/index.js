@@ -839,7 +839,9 @@ async function getExtensionInstallStatus(req, res) {
     ? connectedAccounts.find((account) => account.email === accountEmail)
     : null;
   const inferredKnownAccount = accountEmail && !selectedAccount
-    ? (await getKnownOrgMailAccount(install.orgId, accountEmail)) || (await inferKnownInstallAccount(installId, accountEmail))
+    ? (await getKnownOrgMailAccount(install.orgId, accountEmail)) ||
+      (await inferKnownInstallAccount(installId, accountEmail)) ||
+      (await getKnownAuthAccount(accountEmail))
     : null;
   const effectiveInstall = inferredKnownAccount
     ? {
@@ -908,6 +910,34 @@ async function getKnownOrgMailAccount(orgId, accountEmail) {
     email: normalizedEmail,
     status: account.status === "connected" ? "connected" : "login_required"
   };
+}
+
+async function getKnownAuthAccount(accountEmail) {
+  const normalizedEmail = normalizeEmail(accountEmail);
+  if (!normalizedEmail) return null;
+
+  try {
+    const user = await getAuth().getUserByEmail(normalizedEmail);
+    const providerIds = (user.providerData || []).map((provider) => provider.providerId);
+    const isMicrosoft = providerIds.some((providerId) => String(providerId).toLowerCase().includes("microsoft")) ||
+      normalizedEmail.includes("@outlook.") ||
+      normalizedEmail.includes("@hotmail.") ||
+      normalizedEmail.includes("@live.");
+    return {
+      email: normalizedEmail,
+      displayName: cleanString(user.displayName, 160) || normalizedEmail,
+      photoURL: cleanString(user.photoURL, 1000),
+      provider: isMicrosoft ? "microsoft" : "google",
+      client: isMicrosoft ? "Outlook" : "Gmail",
+      userUid: cleanString(user.uid, 160),
+      status: "login_required",
+      updatedAt: Timestamp.now()
+    };
+  } catch (error) {
+    if (error?.code === "auth/user-not-found") return null;
+    logger.warn("Could not check known auth account", { email: normalizedEmail, error: error.message });
+    return null;
+  }
 }
 
 async function getOrgMessages(orgId) {
