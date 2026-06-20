@@ -31,11 +31,11 @@
   },
   "options_page": "src/options/options.html",
   "permissions": [
+    "activeTab",
     "alarms",
     "notifications",
     "scripting",
-    "storage",
-    "tabs"
+    "storage"
   ],
   "host_permissions": [
     "https://mail.google.com/*",
@@ -44,10 +44,7 @@
     "https://outlook.office365.com/*",
     "https://simple-track-prod-app.web.app/*",
     "https://simple-track-prod-app.firebaseapp.com/*",
-    "https://*.cloudfunctions.net/*",
-    "https://*.run.app/*",
-    "http://localhost/*",
-    "http://127.0.0.1/*"
+    "https://us-central1-simple-track-prod.cloudfunctions.net/*"
   ],
   "content_scripts": [
     {
