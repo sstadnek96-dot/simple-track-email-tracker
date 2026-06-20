@@ -1,6 +1,6 @@
 # Simple Track Email Tracker
 
-A brand-new Chrome MV3 extension project for Gmail and Outlook webmail email tracking.
+A Chrome MV3 extension project for Gmail and Outlook webmail email tracking.
 
 This repo is intentionally separate from any transcription project. It contains a Chrome MV3 extension plus a Firebase Functions/Firestore backend for real open and click tracking.
 
@@ -19,9 +19,9 @@ Do not load the repo root in Chrome. The repo root contains Firebase backend cod
 - Row indicators for tracked messages:
   - blue dot for sent/not-yet-read,
   - red dot for opened or clicked.
-- Hover cards with open count, click count, last activity, device, and location.
+- Hover cards with open count, click count, file activity, last activity, and event timeline.
 - Silent automatic tracking on send.
-- Popup dashboard with tabs, stats, search, settings link, and demo activity.
+- Popup dashboard with tabs, stats, search, account switching, and settings link.
 - Options page for defaults, notifications, retention, and privacy controls.
 - Firebase Functions backend for message creation, tracking pixels, click redirects, and event storage.
 - Background service worker that syncs real backend status when configured.
@@ -82,4 +82,4 @@ npm run firebase:deploy
 
 Email open tracking records when the recipient's email client loads the tracking image. Some clients proxy or cache images, so timestamps and locations can be approximate. Click tracking works by redirecting links through the Firebase `click` function before sending users to the original URL.
 
-Before publishing broadly, add real user accounts, quotas, and abuse protection. The current backend is suitable for private testing and early product validation.
+Before publishing broadly, finish the Chrome Web Store privacy disclosures, publish a public privacy policy, and review quota/abuse controls for the production launch shape.

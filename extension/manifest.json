@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Simple Track Email Tracker",
   "short_name": "Simple Track",
-  "description": "Track email opens from Gmail and Outlook web with clean inbox indicators.",
+  "description": "Track email opens, link clicks, and file views in Gmail and Outlook web with clean inbox indicators.",
   "version": "0.1.0",
   "action": {
     "default_title": "Simple Track",
