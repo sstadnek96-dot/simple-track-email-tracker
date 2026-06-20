@@ -14,7 +14,6 @@ const PRODUCTION_API_URL = "https://us-central1-simple-track-prod.cloudfunctions
 const WEB_APP_URL = "https://simple-track-prod-app.web.app";
 const ROW_MATCH_DELAY_MS = 3500;
 const BACKEND_REFRESH_ALARM_MINUTES = 15;
-const SIMULATE_ACTIVITY_ALARM_MINUTES = 2;
 const CONNECTION_POLL_ATTEMPTS = 24;
 const CONNECTION_POLL_INTERVAL_MS = 2500;
 const EXTERNAL_MESSAGE_ORIGINS = new Set([
@@ -35,51 +34,6 @@ const DEFAULT_SETTINGS = {
   privacyMode: false
 };
 
-const SAMPLE_MESSAGES = [
-  {
-    id: "demo-lawncare-2026-05-18",
-    subject: "Question About Lawncare From Your Webpage",
-    recipients: ["gardening@usask.ca", "gardenline@usask.ca"],
-    client: "Gmail",
-    status: "opened",
-    opens: 3,
-    clicks: 0,
-    lastActivityAt: "2026-05-18T18:44:14.000Z",
-    sentAt: "2026-05-18T17:09:25.000Z",
-    device: "Chrome on Windows",
-    location: "Saskatoon, SK",
-    muted: false
-  },
-  {
-    id: "demo-banking-2026-05-16",
-    subject: "Re: Stadnyk-128285- Banking info received",
-    recipients: ["Sarah-Lee Suranyi <SSuranyi@sk.bluecross.ca>"],
-    client: "Outlook",
-    status: "opened",
-    opens: 4,
-    clicks: 1,
-    lastActivityAt: "2026-05-16T16:02:13.000Z",
-    sentAt: "2026-05-16T15:10:42.000Z",
-    device: "Edge on Windows",
-    location: "Regina, SK",
-    muted: false
-  },
-  {
-    id: "demo-test-2026-05-19",
-    subject: "test",
-    recipients: ["me"],
-    client: "Gmail",
-    status: "sent",
-    opens: 0,
-    clicks: 0,
-    lastActivityAt: null,
-    sentAt: "2026-05-19T18:04:00.000Z",
-    device: null,
-    location: null,
-    muted: false
-  }
-];
-
 chrome.runtime.onInstalled.addListener(() => {
   ensureSeedData();
   configureAlarms();
@@ -94,19 +48,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "simpleTrack.refreshBackend") {
     refreshBackendMessagesForNotifications();
   }
-
-  if (alarm.name === "simpleTrack.simulateActivity") {
-    simulateTrackingActivity();
-  }
 });
 
 function configureAlarms() {
   chrome.alarms.clear("simpleTrack.refreshBackend", () => {
     chrome.alarms.create("simpleTrack.refreshBackend", { periodInMinutes: BACKEND_REFRESH_ALARM_MINUTES });
   });
-  chrome.alarms.clear("simpleTrack.simulateActivity", () => {
-    chrome.alarms.create("simpleTrack.simulateActivity", { periodInMinutes: SIMULATE_ACTIVITY_ALARM_MINUTES });
-  });
+  chrome.alarms.clear("simpleTrack.simulateActivity");
 }
 
 async function refreshBackendMessagesForNotifications() {
@@ -409,7 +357,7 @@ async function ensureSeedData() {
   const updates = {};
 
   if (!Array.isArray(existing[STORAGE_KEYS.messages])) {
-    updates[STORAGE_KEYS.messages] = SAMPLE_MESSAGES.map(normalizeMessage);
+    updates[STORAGE_KEYS.messages] = [];
   }
 
   if (!existing[STORAGE_KEYS.settings]) {
@@ -986,31 +934,6 @@ function getBackendHeaders(settings, installSecret = "") {
   };
   if (installSecret) headers["X-Simple-Track-Install-Secret"] = installSecret;
   return headers;
-}
-
-async function simulateTrackingActivity() {
-  const settings = await getSettings();
-  if (!settings.trackingEnabled || settings.backendBaseUrl) return;
-
-  const messages = await getMessages();
-  const nextIndex = messages.findIndex((message) => message.status === "sent");
-  if (nextIndex === -1) return;
-
-  const updated = [...messages];
-  updated[nextIndex] = {
-    ...updated[nextIndex],
-    status: "opened",
-    opens: updated[nextIndex].opens + 1,
-    lastActivityAt: new Date().toISOString(),
-    device: "Chrome on Windows",
-    location: "Regina, SK"
-  };
-
-  await chrome.storage.local.set({ [STORAGE_KEYS.messages]: updated });
-
-  if (settings.notificationsEnabled && !updated[nextIndex].muted) {
-    await createNotification(updated[nextIndex]);
-  }
 }
 
 async function notifyForNewOpens(previousMessages, nextMessages, settings) {

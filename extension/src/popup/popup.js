@@ -1,35 +1,8 @@
 const fallbackState = {
   ok: true,
-  messages: [
-    {
-      id: "preview",
-      subject: "Question About Lawncare From Your Webpage",
-      recipients: ["gardening@usask.ca", "gardenline@usask.ca"],
-      status: "opened",
-      opens: 3,
-      clicks: 0,
-      attachmentOpens: 1,
-      lastActivityAt: "2026-05-18T18:44:14.000Z",
-      sentAt: "2026-05-18T17:09:25.000Z",
-      events: [
-        {
-          type: "open",
-          createdAt: "2026-05-18T18:44:14.000Z",
-          url: null
-        },
-        {
-          type: "attachment_open",
-          createdAt: "2026-05-18T18:46:08.000Z",
-          label: "Lawncare quote PDF",
-          kind: "pdf",
-          url: "https://example.com/lawncare"
-        }
-      ],
-      muted: false
-    }
-  ],
+  messages: [],
   settings: { trackingEnabled: true },
-  summary: { sent: 1, opened: 1, unopened: 0, clicked: 0, attachmentOpened: 1, openRate: 100 },
+  summary: { sent: 0, opened: 0, unopened: 0, clicked: 0, attachmentOpened: 0, openRate: 0 },
   connectedAccounts: [],
   knownAccounts: [],
   activeAccountEmail: "",
@@ -159,7 +132,7 @@ async function sendMessage(message) {
   try {
     return await chrome.runtime.sendMessage(message);
   } catch (error) {
-    console.warn("Simple Track popup fell back to preview data", error);
+    console.warn("Simple Track popup could not reach the service worker", error);
     return fallbackState;
   }
 }
