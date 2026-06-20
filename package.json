@@ -5,9 +5,9 @@
   "description": "A polished Chrome MV3 extension prototype for email open tracking in Gmail and Outlook web.",
   "type": "module",
   "scripts": {
-    "test": "node scripts/validate-extension.mjs && node scripts/test-content-ui.mjs",
+    "test": "node scripts/validate-extension.mjs && node scripts/test-content-ui.mjs && node scripts/test-popup-ui.mjs",
     "test:static": "node scripts/validate-extension.mjs",
-    "test:ui": "node scripts/test-content-ui.mjs",
+    "test:ui": "node scripts/test-content-ui.mjs && node scripts/test-popup-ui.mjs",
     "test:web": "node scripts/test-web-app.mjs",
     "app:dev": "npm --prefix hosting/app run dev",
     "app:build": "npm --prefix hosting/app run build",

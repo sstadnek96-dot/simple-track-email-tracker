@@ -782,7 +782,12 @@ async function disconnectExtensionAccount(req, res) {
 
     if (removedAccount?.orgId && orgAccountRef) {
       if (orgAccountSnapshot.exists && orgAccountSnapshot.data().installId === installId) {
-        transaction.delete(orgAccountRef);
+        transaction.set(orgAccountRef, {
+          ...removedAccount,
+          status: "login_required",
+          disconnectedAt: now,
+          updatedAt: now
+        }, { merge: true });
       }
       auditContext = {
         uid: removedAccount.userUid || install.ownerUid || null,
@@ -834,7 +839,7 @@ async function getExtensionInstallStatus(req, res) {
     ? connectedAccounts.find((account) => account.email === accountEmail)
     : null;
   const inferredKnownAccount = accountEmail && !selectedAccount
-    ? await inferKnownInstallAccount(installId, accountEmail)
+    ? (await getKnownOrgMailAccount(install.orgId, accountEmail)) || (await inferKnownInstallAccount(installId, accountEmail))
     : null;
   const effectiveInstall = inferredKnownAccount
     ? {
@@ -881,6 +886,27 @@ async function inferKnownInstallAccount(installId, accountEmail) {
     orgId: cleanString(message.orgId, 160),
     status: "login_required",
     updatedAt: message.updatedAt || message.lastActivityAt || message.sentAt || null
+  };
+}
+
+async function getKnownOrgMailAccount(orgId, accountEmail) {
+  const normalizedOrgId = cleanString(orgId, 160);
+  const normalizedEmail = normalizeEmail(accountEmail);
+  if (!normalizedOrgId || !normalizedEmail) return null;
+
+  const snapshot = await db
+    .collection(ORGS)
+    .doc(normalizedOrgId)
+    .collection(MAIL_ACCOUNTS)
+    .doc(normalizedEmail)
+    .get();
+
+  if (!snapshot.exists) return null;
+  const account = snapshot.data();
+  return {
+    ...account,
+    email: normalizedEmail,
+    status: account.status === "connected" ? "connected" : "login_required"
   };
 }
 

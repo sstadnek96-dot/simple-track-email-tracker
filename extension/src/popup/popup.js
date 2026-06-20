@@ -227,23 +227,26 @@ async function injectContentScript(tabId) {
 
 function normalizePopupState(response, activeTabAccount) {
   const connectedAccounts = Array.isArray(response.connectedAccounts) ? response.connectedAccounts : [];
+  const knownAccounts = Array.isArray(response.knownAccounts) ? response.knownAccounts : connectedAccounts;
   const accountEmail = normalizeEmail(
     activeTabAccount.accountEmail ||
     response.accountStatus?.accountEmail ||
     response.activeAccountEmail
   );
-  const accountStatus = response.accountStatus || activeTabAccount.accountStatus || getLocalAccountStatus(accountEmail, connectedAccounts);
+  const accountStatus = response.accountStatus || activeTabAccount.accountStatus || getLocalAccountStatus(accountEmail, connectedAccounts, knownAccounts);
 
   return {
     ...fallbackState,
     ...response,
     connectedAccounts,
+    knownAccounts,
     activeTabAccount,
     activeAccountEmail: accountEmail || normalizeEmail(response.activeAccountEmail),
     accountStatus: {
       ...accountStatus,
       accountEmail: normalizeEmail(accountStatus.accountEmail || accountEmail),
-      connectedAccounts
+      connectedAccounts,
+      knownAccounts
     }
   };
 }
@@ -358,6 +361,7 @@ function renderAccountPanel() {
   const status = getCurrentPopupAccountStatus();
   const activeTab = currentState.activeTabAccount || {};
   const isConnected = status.status === "connected";
+  const needsLogin = status.status === "login_required";
   const isDisconnected = Boolean(activeTab.isMailTab && accountEmail && !isConnected);
 
   elements.accountPanel.classList.toggle("is-connected", isConnected);
@@ -370,7 +374,7 @@ function renderAccountPanel() {
   elements.disconnectAccount.hidden = !accountEmail || !isConnected;
   elements.connectAccount.disabled = accountActionBusy;
   elements.disconnectAccount.disabled = accountActionBusy;
-  elements.connectAccount.textContent = accountActionBusy ? "Opening..." : "Connect";
+  elements.connectAccount.textContent = accountActionBusy ? "Opening..." : needsLogin ? "Log back in" : "Connect";
   elements.disconnectAccount.textContent = accountActionBusy ? "Saving..." : "Log out";
 }
 
@@ -403,7 +407,7 @@ function getCurrentPopupAccountEmail() {
 
 function getCurrentPopupAccountStatus() {
   const accountEmail = getCurrentPopupAccountEmail();
-  return currentState.accountStatus || getLocalAccountStatus(accountEmail, currentState.connectedAccounts || []);
+  return currentState.accountStatus || getLocalAccountStatus(accountEmail, currentState.connectedAccounts || [], currentState.knownAccounts || []);
 }
 
 function getAccountStatusLabel(status, activeTab) {
@@ -419,6 +423,10 @@ function getAccountStatusLabel(status, activeTab) {
 
   if (status.status === "connected") {
     return `Tracking is connected for this ${client} account.`;
+  }
+
+  if (status.status === "login_required") {
+    return `Log back in to re-enable email tracking for this ${client} account.`;
   }
 
   if (activeTab.isMailTab && status.accountEmail) {
@@ -979,16 +987,19 @@ function formatDetailedDate(value) {
   }).format(new Date(value));
 }
 
-function getLocalAccountStatus(accountEmail, connectedAccounts = []) {
+function getLocalAccountStatus(accountEmail, connectedAccounts = [], knownAccounts = []) {
   const normalizedEmail = normalizeEmail(accountEmail);
   const accounts = Array.isArray(connectedAccounts) ? connectedAccounts : [];
+  const known = Array.isArray(knownAccounts) ? knownAccounts : [];
   const account = accounts.find((entry) => normalizeEmail(entry.email) === normalizedEmail);
+  const knownAccount = known.find((entry) => normalizeEmail(entry.email) === normalizedEmail);
 
   return {
-    status: account ? "connected" : normalizedEmail ? "not_connected" : "unknown_account",
+    status: account ? "connected" : knownAccount ? "login_required" : normalizedEmail ? "not_connected" : "unknown_account",
     accountEmail: normalizedEmail,
-    account: account || null,
-    connectedAccounts: accounts
+    account: account || knownAccount || null,
+    connectedAccounts: accounts,
+    knownAccounts: known
   };
 }
 
