@@ -145,14 +145,21 @@ async function runBrowserChecks() {
 
               if (message?.type === "simpleTrack:disconnectAccount") {
                 const remainingAccounts = connectedAccounts.filter((account) => account.email !== message.accountEmail);
+                const disconnectedAccount = connectedAccounts.find((account) => account.email === message.accountEmail);
+                const knownAccounts = disconnectedAccount
+                  ? [...remainingAccounts, { ...disconnectedAccount, status: "login_required" }]
+                  : remainingAccounts;
                 callback({
                   ok: true,
                   connectedAccounts: remainingAccounts,
+                  knownAccounts,
                   activeAccountEmail: remainingAccounts[0]?.email || "",
                   accountStatus: {
-                    status: "not_connected",
+                    status: "login_required",
                     accountEmail: message.accountEmail,
-                    connectedAccounts: remainingAccounts
+                    connectedAccounts: remainingAccounts,
+                    knownAccounts,
+                    account: knownAccounts.find((account) => account.email === message.accountEmail) || null
                   }
                 });
                 return;
@@ -362,7 +369,11 @@ async function runBrowserChecks() {
     ).some((request) => request.type === "simpleTrack:disconnectAccount" && request.accountEmail === "spencer.tpp@gmail.com"));
     await page.waitForSelector("text=Question About Lawncare");
     await page.locator(".profile-button").click();
-    assert.equal(await profileMenu.getByText("spencer.tpp@gmail.com").count(), 0, "signed-out account should be removed from the web app account menu");
+    assert.equal(
+      await page.getByRole("button", { name: "Log back in to spencer.tpp@gmail.com" }).count(),
+      1,
+      "signed-out account should stay in the web app account menu as a login-required row"
+    );
     await page.getByLabel("Close account menu").click();
 
     await page.getByRole("button", { name: "Email tracking" }).first().click();

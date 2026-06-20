@@ -75,6 +75,9 @@ function readExtensionContext(searchParams, hashParams) {
   const connectedAccounts = Array.isArray(context?.connectedAccounts)
     ? context.connectedAccounts.map(normalizeAccountRecord).filter(Boolean)
     : [];
+  const knownAccounts = Array.isArray(context?.knownAccounts)
+    ? context.knownAccounts.map(normalizeAccountRecord).filter(Boolean)
+    : [];
 
   return {
     extensionId: String(context?.extensionId || ""),
@@ -83,7 +86,8 @@ function readExtensionContext(searchParams, hashParams) {
     handoffAccountEmail: normalizeAccountEmail(context?.handoffAccountEmail),
     handoffToken: String(context?.handoffToken || ""),
     handoffTokens: normalizeHandoffTokens(context),
-    connectedAccounts
+    connectedAccounts,
+    knownAccounts
   };
 }
 
@@ -124,7 +128,8 @@ function hasExtensionContext(context) {
     context?.extensionId ||
     context?.installId ||
     Object.keys(context?.handoffTokens || {}).length ||
-    context?.connectedAccounts?.length
+    context?.connectedAccounts?.length ||
+    context?.knownAccounts?.length
   );
 }
 
@@ -136,9 +141,11 @@ function mergeExtensionContexts(...contexts) {
     handoffAccountEmail: "",
     handoffToken: "",
     handoffTokens: {},
-    connectedAccounts: []
+    connectedAccounts: [],
+    knownAccounts: []
   };
   const byEmail = new Map();
+  const knownByEmail = new Map();
 
   for (const context of contexts) {
     if (!context) continue;
@@ -159,9 +166,21 @@ function mergeExtensionContexts(...contexts) {
         photoURL: existing?.photoURL || normalized.photoURL
       });
     }
+
+    for (const account of context.knownAccounts || []) {
+      const normalized = normalizeAccountRecord(account);
+      if (!normalized) continue;
+      const existing = knownByEmail.get(normalized.email);
+      knownByEmail.set(normalized.email, {
+        ...existing,
+        ...normalized,
+        photoURL: existing?.photoURL || normalized.photoURL
+      });
+    }
   }
 
   merged.connectedAccounts = [...byEmail.values()];
+  merged.knownAccounts = [...knownByEmail.values()];
   return merged;
 }
 
@@ -180,6 +199,9 @@ function readStoredExtensionContext() {
       handoffTokens: normalizeHandoffTokens(stored),
       connectedAccounts: Array.isArray(stored.connectedAccounts)
         ? stored.connectedAccounts.map(normalizeAccountRecord).filter(Boolean)
+        : [],
+      knownAccounts: Array.isArray(stored.knownAccounts)
+        ? stored.knownAccounts.map(normalizeAccountRecord).filter(Boolean)
         : []
     };
   } catch {
@@ -355,7 +377,10 @@ function App() {
   const profileAccounts = useMemo(
     () => mergeProfileAccounts(
       data?.connectedAccounts || bootstrap?.connectedAccounts || [],
-      extensionSessionContext?.connectedAccounts || []
+      [
+        ...(extensionSessionContext?.connectedAccounts || []),
+        ...(extensionSessionContext?.knownAccounts || [])
+      ]
     ),
     [data?.connectedAccounts, bootstrap?.connectedAccounts, extensionSessionContext]
   );
@@ -392,7 +417,8 @@ function App() {
       const remainingAccounts = replaceDisconnectedAccountState(
         disconnectedEmail,
         Array.isArray(message.connectedAccounts) ? message.connectedAccounts : null,
-        message.activeAccountEmail || ""
+        message.activeAccountEmail || "",
+        Array.isArray(message.knownAccounts) ? message.knownAccounts : null
       );
       const nextEmail = normalizeAccountEmail(message.activeAccountEmail) || remainingAccounts[0]?.email || "";
 
@@ -703,7 +729,8 @@ function App() {
     const remainingAccounts = replaceDisconnectedAccountState(
       selectedEmail,
       response?.connectedAccounts || null,
-      response?.activeAccountEmail || ""
+      response?.activeAccountEmail || "",
+      response?.knownAccounts || null
     );
     const nextEmail = normalizeAccountEmail(response?.activeAccountEmail) || remainingAccounts[0]?.email || "";
 
@@ -715,15 +742,29 @@ function App() {
     await logout();
   }
 
-  function replaceDisconnectedAccountState(disconnectedEmail, connectedAccounts = null, activeAccountEmail = "") {
+  function replaceDisconnectedAccountState(disconnectedEmail, connectedAccounts = null, activeAccountEmail = "", knownAccounts = null) {
     const disconnected = normalizeAccountEmail(disconnectedEmail);
-    const remainingAccounts = (Array.isArray(connectedAccounts)
+    const remainingConnectedAccounts = (Array.isArray(connectedAccounts)
       ? connectedAccounts
       : profileAccounts
     )
       .map(normalizeAccountRecord)
       .filter((account) => account && account.email !== disconnected);
-    const nextActiveEmail = normalizeAccountEmail(activeAccountEmail) || remainingAccounts[0]?.email || "";
+    const disconnectedAccount = [
+      ...(Array.isArray(knownAccounts) ? knownAccounts : []),
+      ...profileAccounts
+    ]
+      .map(normalizeAccountRecord)
+      .find((account) => account?.email === disconnected) || { email: disconnected };
+    const remainingKnownAccounts = mergeAccountRecordLists(
+      Array.isArray(knownAccounts) ? knownAccounts : profileAccounts,
+      [{
+        ...disconnectedAccount,
+        email: disconnected,
+        status: "login_required"
+      }]
+    ).filter((account) => account.email !== disconnected || account.status === "login_required");
+    const nextActiveEmail = normalizeAccountEmail(activeAccountEmail) || remainingConnectedAccounts[0]?.email || "";
 
     setExtensionSessionContext((current) => {
       const handoffTokens = { ...(current?.handoffTokens || {}) };
@@ -734,7 +775,8 @@ function App() {
         handoffAccountEmail: "",
         handoffToken: "",
         handoffTokens,
-        connectedAccounts: remainingAccounts
+        connectedAccounts: remainingConnectedAccounts,
+        knownAccounts: remainingKnownAccounts
       };
       writeStoredExtensionContext(next);
       return next;
@@ -742,14 +784,28 @@ function App() {
 
     setBootstrap((current) => current ? {
       ...current,
-      connectedAccounts: (current.connectedAccounts || []).filter((account) => normalizeAccountEmail(account.email) !== disconnected)
+      connectedAccounts: mergeAccountRecordLists(
+        (current.connectedAccounts || []).filter((account) => normalizeAccountEmail(account.email) !== disconnected),
+        [{
+          ...disconnectedAccount,
+          email: disconnected,
+          status: "login_required"
+        }]
+      )
     } : current);
     setData((current) => current ? {
       ...current,
-      connectedAccounts: (current.connectedAccounts || []).filter((account) => normalizeAccountEmail(account.email) !== disconnected)
+      connectedAccounts: mergeAccountRecordLists(
+        (current.connectedAccounts || []).filter((account) => normalizeAccountEmail(account.email) !== disconnected),
+        [{
+          ...disconnectedAccount,
+          email: disconnected,
+          status: "login_required"
+        }]
+      )
     } : current);
 
-    return remainingAccounts;
+    return remainingConnectedAccounts;
   }
 
   function openSettingsPage() {
@@ -1093,10 +1149,10 @@ function MailAccountRow({ account, active, onSwitchAccount, onChangeLogin }) {
   const needsLoginSwitch = account.status === "login_required";
   const label = connected
     ? active ? "Active" : "Switch"
-    : browserConnected || needsLoginSwitch ? "Switch" : "Connect";
+    : needsLoginSwitch ? "Log back in" : browserConnected ? "Switch" : "Connect";
   const secondaryText = browserConnected
     ? `${account.email} - tracking connected`
-    : needsLoginSwitch ? `${account.email} - tracking connected` : account.email;
+    : needsLoginSwitch ? `${account.email} - logged out` : account.email;
 
   return (
     <button
@@ -1116,7 +1172,7 @@ function MailAccountRow({ account, active, onSwitchAccount, onChangeLogin }) {
         }
         onChangeLogin(account.email);
       }}
-      aria-label={connected || browserConnected || needsLoginSwitch ? `Switch to ${account.email}` : `Connect ${account.email}`}
+      aria-label={needsLoginSwitch ? `Log back in to ${account.email}` : connected || browserConnected ? `Switch to ${account.email}` : `Connect ${account.email}`}
     >
       <AccountAvatar account={account} />
       <span className="mail-account-copy">
@@ -1163,30 +1219,47 @@ function getAccountProviderType(account) {
 }
 
 function buildProfileMailAccounts(accounts) {
-  const byEmail = new Map();
-  for (const account of accounts) {
-    const normalized = normalizeAccountRecord(account);
-    if (!normalized) continue;
-    byEmail.set(normalized.email, normalized);
-  }
-
-  return [...byEmail.values()].sort((a, b) => {
+  return mergeAccountRecordLists(accounts).sort((a, b) => {
     if (a.status === b.status) return a.email.localeCompare(b.email);
     return accountStatusRank(a.status) - accountStatusRank(b.status);
   });
+}
+
+function mergeAccountRecordLists(...accountLists) {
+  const byEmail = new Map();
+  for (const account of accountLists.flat()) {
+    const normalized = normalizeAccountRecord(account);
+    if (!normalized) continue;
+    const existing = byEmail.get(normalized.email);
+    byEmail.set(normalized.email, {
+      ...existing,
+      ...normalized,
+      displayName: normalized.displayName || existing?.displayName,
+      photoURL: normalized.photoURL || existing?.photoURL || "",
+      provider: normalized.provider || existing?.provider,
+      client: normalized.client || existing?.client
+    });
+  }
+  return [...byEmail.values()];
 }
 
 function mergeProfileAccounts(workspaceAccounts = [], extensionAccounts = []) {
   const byEmail = new Map();
 
   for (const account of workspaceAccounts) {
-    const normalized = normalizeAccountRecord({ ...account, status: "connected" });
+    const normalized = normalizeAccountRecord({
+      ...account,
+      status: account?.status === "login_required" ? "login_required" : "connected"
+    });
     if (!normalized) continue;
     byEmail.set(normalized.email, normalized);
   }
 
   for (const account of extensionAccounts) {
-    const normalized = normalizeAccountRecord({ ...account, status: "browser_connected" });
+    const normalized = normalizeAccountRecord({
+      ...account,
+      status: account?.status === "login_required" ? "login_required" : "browser_connected"
+    });
     if (!normalized) continue;
     const existing = byEmail.get(normalized.email);
     if (existing) {
@@ -1195,7 +1268,8 @@ function mergeProfileAccounts(workspaceAccounts = [], extensionAccounts = []) {
         displayName: existing.displayName || normalized.displayName,
         photoURL: existing.photoURL || normalized.photoURL,
         provider: existing.provider || normalized.provider,
-        client: existing.client || normalized.client
+        client: existing.client || normalized.client,
+        status: getPreferredAccountStatus(existing.status, normalized.status)
       });
       continue;
     }
@@ -1246,6 +1320,13 @@ function accountStatusRank(status) {
   if (status === "browser_connected") return 1;
   if (status === "login_required") return 1;
   return 2;
+}
+
+function getPreferredAccountStatus(currentStatus, nextStatus) {
+  if (currentStatus === "connected" || nextStatus === "connected") return "connected";
+  if (currentStatus === "browser_connected" || nextStatus === "browser_connected") return "browser_connected";
+  if (currentStatus === "login_required" || nextStatus === "login_required") return "login_required";
+  return nextStatus || currentStatus || "connected";
 }
 
 function getMailClientLabel(account) {

@@ -33,6 +33,7 @@ chrome.runtime.onMessage.addListener((message) => {
     type: "simpleTrack:accountDisconnected",
     accountEmail: message.accountEmail || "",
     connectedAccounts: message.connectedAccounts || [],
+    knownAccounts: message.knownAccounts || [],
     activeAccountEmail: message.activeAccountEmail || ""
   };
 

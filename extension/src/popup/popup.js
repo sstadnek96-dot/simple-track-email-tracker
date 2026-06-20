@@ -695,14 +695,27 @@ function buildWebAppContext(activeAccountEmail = "") {
         }))
         .filter((account) => account.email)
     : [];
+  const knownAccounts = Array.isArray(currentState.knownAccounts)
+    ? currentState.knownAccounts
+        .map((account) => ({
+          email: normalizeEmail(account.email),
+          displayName: account.displayName || account.name || account.email || "",
+          photoURL: account.photoURL || account.photoUrl || "",
+          provider: account.provider || "google",
+          client: account.client || "Gmail",
+          status: account.status || "login_required"
+        }))
+        .filter((account) => account.email)
+    : [];
 
-  if (!connectedAccounts.length && !currentState.installId) return null;
+  if (!connectedAccounts.length && !knownAccounts.length && !currentState.installId) return null;
 
   return {
     extensionId: globalThis.chrome?.runtime?.id || "",
     installId: currentState.installId || "",
     activeAccountEmail: normalizeEmail(activeAccountEmail || currentState.activeAccountEmail),
-    connectedAccounts
+    connectedAccounts,
+    knownAccounts
   };
 }
 

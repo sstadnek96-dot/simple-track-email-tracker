@@ -790,6 +790,7 @@ async function notifyWebAppAccountDisconnected(accountEmail, state = {}) {
           type: "simpleTrack:accountDisconnected",
           accountEmail,
           connectedAccounts: state.connectedAccounts || [],
+          knownAccounts: state.knownAccounts || [],
           activeAccountEmail: state.activeAccountEmail || ""
         }).catch(() => null)
       : Promise.resolve(null)
