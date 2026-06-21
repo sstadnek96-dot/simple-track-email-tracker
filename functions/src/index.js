@@ -369,14 +369,22 @@ async function handleAppRequest(req, res, route) {
   }
 
   if (req.method === "POST" && appRoute === "/extension-session") {
-    await enforceAppRateLimit(req, "extension-session", 60, 15 * 60);
-    await createExtensionAppSession(req, res);
+    const body = await readJson(req);
+    await enforceAppRateLimit(req, "extension-session", 240, 15 * 60, buildAppRateLimitScope({
+      installId: cleanString(body.installId, 120),
+      accountEmail: normalizeEmail(body.accountEmail)
+    }));
+    await createExtensionAppSession(req, res, body);
     return;
   }
 
   if (req.method === "POST" && appRoute === "/extension-disconnect") {
-    await enforceAppRateLimit(req, "extension-disconnect", 60, 15 * 60);
-    await disconnectExtensionAccount(req, res);
+    const body = await readJson(req);
+    await enforceAppRateLimit(req, "extension-disconnect", 120, 15 * 60, buildAppRateLimitScope({
+      installId: cleanString(body.installId, 120),
+      accountEmail: normalizeEmail(body.accountEmail)
+    }));
+    await disconnectExtensionAccount(req, res, body);
     return;
   }
 
@@ -452,8 +460,13 @@ async function handleAppRequest(req, res, route) {
   }
 
   if (req.method === "POST" && appRoute === "/connect-extension") {
-    await enforceAppRateLimit(req, "connect-extension", 30, 15 * 60);
-    await connectExtensionAccount(context, req, res);
+    const body = await readJson(req);
+    await enforceAppRateLimit(req, "connect-extension", 120, 15 * 60, buildAppRateLimitScope({
+      uid: context.uid,
+      installId: cleanString(body.installId, 120),
+      accountEmail: normalizeEmail(body.accountEmail)
+    }));
+    await connectExtensionAccount(context, req, res, body);
     return;
   }
 
@@ -591,8 +604,8 @@ async function getOrgMailAccounts(orgId) {
   return snapshot.docs.map((doc) => ({ id: doc.id, ...serializeTimestamps(doc.data()) }));
 }
 
-async function connectExtensionAccount(context, req, res) {
-  const body = await readJson(req);
+async function connectExtensionAccount(context, req, res, providedBody = null) {
+  const body = providedBody || await readJson(req);
   const installId = cleanString(body.installId, 120);
   const installSecret = cleanString(body.installSecret, 240);
   const accountEmail = normalizeEmail(body.accountEmail);
@@ -692,8 +705,8 @@ async function connectExtensionAccount(context, req, res) {
   });
 }
 
-async function createExtensionAppSession(req, res) {
-  const body = await readJson(req);
+async function createExtensionAppSession(req, res, providedBody = null) {
+  const body = providedBody || await readJson(req);
   const installId = cleanString(body.installId, 120);
   const accountEmail = normalizeEmail(body.accountEmail);
 
@@ -732,8 +745,8 @@ async function createExtensionAppSession(req, res) {
   });
 }
 
-async function disconnectExtensionAccount(req, res) {
-  const body = await readJson(req);
+async function disconnectExtensionAccount(req, res, providedBody = null) {
+  const body = providedBody || await readJson(req);
   const installId = cleanString(body.installId, 120);
   const accountEmail = normalizeEmail(body.accountEmail);
 
@@ -1415,11 +1428,13 @@ async function writeAuditLog(context, action, targetType, targetId, metadata = {
   });
 }
 
-async function enforceAppRateLimit(req, action, maxRequests, windowSeconds) {
+async function enforceAppRateLimit(req, action, maxRequests, windowSeconds, scope = "") {
   const ipHash = hashIp(getRequestIp(req)) || "unknown";
+  const scopeHash = scope ? hashSecret(scope) : "";
+  const limiterKey = scopeHash || ipHash;
   const windowMs = windowSeconds * 1000;
   const windowStart = Math.floor(Date.now() / windowMs) * windowMs;
-  const ref = db.collection(RATE_LIMITS).doc(hashSecret(`app:${action}:${ipHash}:${windowStart}`));
+  const ref = db.collection(RATE_LIMITS).doc(hashSecret(`app:${action}:${limiterKey}:${windowStart}`));
 
   await db.runTransaction(async (transaction) => {
     const snapshot = await transaction.get(ref);
@@ -1433,6 +1448,8 @@ async function enforceAppRateLimit(req, action, maxRequests, windowSeconds) {
     transaction.set(ref, {
       action,
       ipHash,
+      scopeHash: scopeHash || null,
+      basis: scopeHash ? "scope" : "ip",
       windowStart: Timestamp.fromMillis(windowStart),
       windowSeconds,
       count: currentCount + 1,
@@ -1440,6 +1457,14 @@ async function enforceAppRateLimit(req, action, maxRequests, windowSeconds) {
       expiresAt: Timestamp.fromMillis(windowStart + (windowMs * 2))
     }, { merge: true });
   });
+}
+
+function buildAppRateLimitScope(parts = {}) {
+  return Object.entries(parts)
+    .map(([key, value]) => [key, cleanString(value, 240)])
+    .filter(([, value]) => value)
+    .map(([key, value]) => `${key}:${value.toLowerCase()}`)
+    .join("|");
 }
 
 function getInstallConnectedAccounts(install) {
@@ -1917,9 +1942,17 @@ function toCsv(rows) {
 }
 
 async function readJson(req) {
-  if (req.body && typeof req.body === "object") return req.body;
-  if (typeof req.body === "string" && req.body.trim()) return JSON.parse(req.body);
-  return {};
+  if (req.simpleTrackJsonBody !== undefined) return req.simpleTrackJsonBody;
+  if (req.body && typeof req.body === "object") {
+    req.simpleTrackJsonBody = req.body;
+    return req.simpleTrackJsonBody;
+  }
+  if (typeof req.body === "string" && req.body.trim()) {
+    req.simpleTrackJsonBody = JSON.parse(req.body);
+    return req.simpleTrackJsonBody;
+  }
+  req.simpleTrackJsonBody = {};
+  return req.simpleTrackJsonBody;
 }
 
 function normalizeRoute(pathname) {
