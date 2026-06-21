@@ -175,6 +175,10 @@ async function handleMessage(message) {
     return refreshAccountConnection(message);
   }
 
+  if (message.type === "simpleTrack:connectSignedInAccount") {
+    return connectSignedInAccount(message);
+  }
+
   if (message.type === "simpleTrack:selectAccount") {
     return selectAccount(message);
   }
@@ -253,6 +257,10 @@ async function handleExternalMessage(message, sender = {}) {
 
   if (message?.type === "simpleTrack:refreshAccountConnection") {
     return refreshAccountConnection(message);
+  }
+
+  if (message?.type === "simpleTrack:connectSignedInAccount") {
+    return connectSignedInAccount(message);
   }
 
   return { ok: false, error: "Unsupported Simple Track web app request." };
@@ -633,6 +641,89 @@ async function refreshAccountConnection(message = {}) {
   const result = { ok: true, ...status, ...saved };
   notifyWebAppAccountConnectionChanged(accountEmail, result).catch((error) => {
     console.warn("Simple Track could not notify web app account refresh", error);
+  });
+  return result;
+}
+
+async function connectSignedInAccount(message = {}) {
+  const settings = await getSettings();
+  const installId = await getInstallId();
+  const installSecret = await getInstallSecret();
+  const accountEmail = normalizeEmail(message.accountEmail);
+  const idToken = String(message.idToken || "");
+  const client = String(message.client || "Gmail");
+  const provider = String(message.provider || getProviderForClient(client));
+  const accountDisplayName = String(message.accountDisplayName || accountEmail);
+  const accountPhotoURL = String(message.accountPhotoURL || "");
+
+  if (!settings.backendBaseUrl) {
+    return { ok: false, error: "Tracking service is not configured." };
+  }
+
+  if (!installId || !installSecret || !accountEmail || !idToken) {
+    return { ok: false, error: "Missing extension install or signed-in account details." };
+  }
+
+  let response;
+  try {
+    const headers = getBackendHeaders(settings, installSecret);
+    headers.Authorization = `Bearer ${idToken}`;
+    response = await fetch(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/app/connect-extension`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        installId,
+        installSecret,
+        accountEmail,
+        client,
+        provider,
+        accountDisplayName,
+        accountPhotoURL
+      })
+    });
+  } catch (error) {
+    return { ok: false, error: error.message || "Could not reach the tracking service." };
+  }
+
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !body?.ok) {
+    return { ok: false, error: body?.error || `Account reconnect failed (${response.status})` };
+  }
+
+  let state;
+  try {
+    state = await fetchInstallStatus(settings, installId, installSecret, accountEmail);
+  } catch {
+    const connectedAccount = {
+      email: accountEmail,
+      displayName: accountDisplayName,
+      photoURL: accountPhotoURL,
+      provider,
+      client,
+      status: "connected"
+    };
+    state = {
+      ok: true,
+      connectedAccounts: mergeAccountLists(await getConnectedAccounts(), [connectedAccount]),
+      knownAccounts: mergeAccountLists(await getKnownAccounts(), [connectedAccount]),
+      activeAccountEmail: accountEmail,
+      accountStatus: {
+        status: "connected",
+        accountEmail,
+        account: connectedAccount
+      }
+    };
+  }
+
+  const saved = await saveInstallAccountState(state, accountEmail);
+  const result = {
+    ok: true,
+    ...body,
+    ...saved,
+    accountStatus: state.accountStatus || getAccountStatus(accountEmail, saved.connectedAccounts, saved.knownAccounts)
+  };
+  notifyWebAppAccountConnectionChanged(accountEmail, result).catch((error) => {
+    console.warn("Simple Track could not notify web app account reconnect", error);
   });
   return result;
 }

@@ -196,14 +196,17 @@ function mergeExtensionContexts(...contexts) {
     merged.handoffAccountEmail = context.handoffAccountEmail || merged.handoffAccountEmail;
     merged.handoffToken = context.handoffToken || merged.handoffToken;
     merged.handoffTokens = { ...merged.handoffTokens, ...(context.handoffTokens || {}) };
+    const contextConnectedEmails = new Set();
 
     for (const account of context.connectedAccounts || []) {
       const normalized = normalizeAccountRecord(account);
       if (!normalized) continue;
+      contextConnectedEmails.add(normalized.email);
       const existing = byEmail.get(normalized.email);
       byEmail.set(normalized.email, {
         ...existing,
         ...normalized,
+        status: normalized.status === "login_required" ? "connected" : normalized.status || "connected",
         photoURL: existing?.photoURL || normalized.photoURL
       });
     }
@@ -211,6 +214,9 @@ function mergeExtensionContexts(...contexts) {
     for (const account of context.knownAccounts || []) {
       const normalized = normalizeAccountRecord(account);
       if (!normalized) continue;
+      if (normalized.status === "login_required" && !contextConnectedEmails.has(normalized.email)) {
+        byEmail.delete(normalized.email);
+      }
       const existing = knownByEmail.get(normalized.email);
       knownByEmail.set(normalized.email, {
         ...existing,
@@ -220,13 +226,10 @@ function mergeExtensionContexts(...contexts) {
     }
   }
 
-  merged.knownAccounts = [...knownByEmail.values()];
-  const loginRequiredEmails = new Set(
-    merged.knownAccounts
-      .filter((account) => account.status === "login_required")
-      .map((account) => account.email)
-  );
-  merged.connectedAccounts = [...byEmail.values()].filter((account) => !loginRequiredEmails.has(account.email));
+  const connectedEmails = new Set(byEmail.keys());
+  merged.connectedAccounts = [...byEmail.values()];
+  merged.knownAccounts = [...knownByEmail.values()]
+    .filter((account) => !(connectedEmails.has(account.email) && account.status === "login_required"));
   return merged;
 }
 
@@ -485,7 +488,7 @@ function App() {
       const extensionConnectedAccounts = extensionSessionContext?.connectedAccounts || [];
       const connectedEmails = new Set(extensionConnectedAccounts.map((account) => normalizeAccountEmail(account.email)).filter(Boolean));
       const extensionKnownAccounts = (extensionSessionContext?.knownAccounts || [])
-        .filter((account) => account.status === "login_required" || !connectedEmails.has(normalizeAccountEmail(account.email)));
+        .filter((account) => !connectedEmails.has(normalizeAccountEmail(account.email)));
       return mergeProfileAccounts(
         data?.connectedAccounts || bootstrap?.connectedAccounts || [],
         [
@@ -753,11 +756,24 @@ function App() {
   async function login(providerName, loginHint = "", options = {}) {
     setError("");
     try {
+      if (allowHarness) {
+        const email = normalizeAccountEmail(loginHint) || normalizeAccountEmail(user?.email) || "s.stadnek96@gmail.com";
+        const harnessUser = createHarnessUser({
+          email,
+          displayName: email === "spencer.tpp@gmail.com" ? "Spencer Stadnek" : email === "spencerstadnek@gmail.com" ? "Spencer Stadnek" : "Spencer Davidson"
+        });
+        window.__simpleTrackHarnessAuthEmail = harnessUser.email;
+        if (options.skipWorkspaceLoad) skipNextUserWorkspaceLoadRef.current = true;
+        setUser(harnessUser);
+        return harnessUser;
+      }
+
       const provider = providerName === "microsoft" ? microsoftProvider : googleProvider;
       provider.setCustomParameters({
         prompt: "select_account",
         ...(loginHint ? { login_hint: normalizeAccountEmail(loginHint) } : {})
       });
+      if (options.skipWorkspaceLoad) skipNextUserWorkspaceLoadRef.current = true;
       const result = await signInWithPopup(auth, provider);
       const photoURL = await getLoginProfilePhoto(result, providerName);
       const nextUser = toUser(result.user, photoURL);
@@ -896,6 +912,33 @@ function App() {
 
     return firstSuccessfulExtensionResponse([
       requestExtensionBridge("simpleTrack:refreshAccountConnection", payload),
+      requestExtensionExternal(payload)
+    ]);
+  }
+
+  async function requestExtensionConnectSignedInAccount(account = {}, signedInUser = null) {
+    const normalizedEmail = normalizeAccountEmail(account.email || signedInUser?.email);
+    if (!normalizedEmail || !signedInUser?.getIdToken) return null;
+
+    const idToken = await signedInUser.getIdToken();
+    const accountRecord = normalizeAccountRecord({
+      ...account,
+      email: normalizedEmail,
+      displayName: signedInUser.displayName || account.displayName || normalizedEmail,
+      photoURL: signedInUser.photoURL || account.photoURL || ""
+    }) || { email: normalizedEmail };
+    const payload = {
+      type: "simpleTrack:connectSignedInAccount",
+      accountEmail: normalizedEmail,
+      idToken,
+      client: accountRecord.client || getMailClientLabel(accountRecord),
+      provider: getAccountProviderType(accountRecord),
+      accountDisplayName: signedInUser.displayName || accountRecord.displayName || normalizedEmail,
+      accountPhotoURL: signedInUser.photoURL || accountRecord.photoURL || ""
+    };
+
+    return firstSuccessfulExtensionResponse([
+      requestExtensionBridge("simpleTrack:connectSignedInAccount", payload),
       requestExtensionExternal(payload)
     ]);
   }
@@ -1208,9 +1251,41 @@ function App() {
 
     if (normalizedEmail) {
       if (account.status === "login_required") {
-        const response = await requestExtensionStartAccountConnection(normalizedEmail, account);
-        if (!response?.ok) {
-          await login(getAccountProviderType(account), normalizedEmail);
+        setSwitchingAccountEmail(normalizedEmail);
+        try {
+          const signedInUser = await login(getAccountProviderType(account), normalizedEmail, {
+            rethrow: true,
+            skipWorkspaceLoad: true
+          });
+          if (!signedInUser) return;
+
+          const signedInEmail = normalizeAccountEmail(signedInUser.email);
+          if (signedInEmail !== normalizedEmail) {
+            setError(`Sign in with ${normalizedEmail} to re-enable tracking for that mail account.`);
+            return;
+          }
+
+          const response = await requestExtensionConnectSignedInAccount(account, signedInUser);
+          if (!response?.ok) {
+            setError(response?.error || "Simple Track could not reconnect this account to the extension. Reload Gmail and try again.");
+            return;
+          }
+
+          rememberExtensionSession({
+            activeAccountEmail: response.activeAccountEmail || normalizedEmail,
+            connectedAccounts: response.connectedAccounts || [{ ...account, email: normalizedEmail, status: "connected" }],
+            knownAccounts: response.knownAccounts || response.connectedAccounts || [{ ...account, email: normalizedEmail, status: "connected" }]
+          });
+          setAppRouteState({
+            page: activePage,
+            accountEmail: normalizedEmail,
+            messageId: ""
+          }, { replace: true });
+          await loadWorkspace(normalizedEmail, { showLoading: false });
+        } catch (loginError) {
+          setError(loginError.message);
+        } finally {
+          setSwitchingAccountEmail("");
         }
         return;
       }
@@ -1740,9 +1815,9 @@ function accountStatusRank(status) {
 }
 
 function getPreferredAccountStatus(currentStatus, nextStatus) {
-  if (currentStatus === "login_required" || nextStatus === "login_required") return "login_required";
   if (currentStatus === "connected" || nextStatus === "connected") return "connected";
   if (currentStatus === "browser_connected" || nextStatus === "browser_connected") return "browser_connected";
+  if (currentStatus === "login_required" || nextStatus === "login_required") return "login_required";
   return nextStatus || currentStatus || "connected";
 }
 
@@ -1879,6 +1954,11 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
         accountDisplayName: accountMatchesWebLogin ? (user?.displayName || requestedEmail) : requestedEmail,
         accountPhotoURL: accountMatchesWebLogin ? (user?.photoURL || "") : ""
       });
+      writeStoredExtensionContext(mergeExtensionContexts(readStoredExtensionContext(), {
+        activeAccountEmail: requestedEmail,
+        connectedAccounts: response.account ? [{ ...response.account, status: "connected" }] : [],
+        knownAccounts: response.account ? [{ ...response.account, status: "connected" }] : []
+      }));
       const refreshed = await refreshExtensionAccountConnection?.(requestedEmail);
       if (refreshed?.ok) {
         writeStoredExtensionContext(mergeExtensionContexts(readStoredExtensionContext(), {

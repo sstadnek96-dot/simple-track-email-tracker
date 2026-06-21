@@ -8,7 +8,8 @@ const SIMPLE_TRACK_WEB_REQUESTS = new Set([
   "simpleTrack:getConnectedAccounts",
   "simpleTrack:disconnectAccount",
   "simpleTrack:startAccountConnection",
-  "simpleTrack:refreshAccountConnection"
+  "simpleTrack:refreshAccountConnection",
+  "simpleTrack:connectSignedInAccount"
 ]);
 
 let extensionContextInvalidated = false;

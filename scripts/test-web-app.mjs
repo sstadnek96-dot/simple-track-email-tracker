@@ -134,7 +134,7 @@ async function runBrowserChecks() {
               source: message?.source || ""
             });
             setTimeout(() => {
-              const connectedAccounts = [
+              window.__simpleTrackConnectedAccounts = window.__simpleTrackConnectedAccounts || [
                 {
                   email: "s.stadnek96@gmail.com",
                   displayName: "Spencer Davidson",
@@ -150,6 +150,7 @@ async function runBrowserChecks() {
                   status: "connected"
                 }
               ];
+              const connectedAccounts = window.__simpleTrackConnectedAccounts;
 
               if (message?.type === "simpleTrack:disconnectAccount") {
                 const remainingAccounts = connectedAccounts.filter((account) => account.email !== message.accountEmail);
@@ -157,6 +158,8 @@ async function runBrowserChecks() {
                 const knownAccounts = disconnectedAccount
                   ? [...remainingAccounts, { ...disconnectedAccount, status: "login_required" }]
                   : remainingAccounts;
+                window.__simpleTrackConnectedAccounts = remainingAccounts;
+                window.__simpleTrackKnownAccounts = knownAccounts;
                 callback({
                   ok: true,
                   connectedAccounts: remainingAccounts,
@@ -203,12 +206,47 @@ async function runBrowserChecks() {
                 return;
               }
 
+              if (message?.type === "simpleTrack:connectSignedInAccount") {
+                const reconnectedAccount = {
+                  email: message.accountEmail,
+                  displayName: message.accountDisplayName || "Spencer Stadnek",
+                  photoURL: message.accountPhotoURL || "",
+                  provider: message.provider || "google",
+                  client: message.client || "Gmail",
+                  status: "connected"
+                };
+                const updatedConnectedAccounts = [
+                  ...connectedAccounts.filter((account) => account.email !== message.accountEmail),
+                  reconnectedAccount
+                ];
+                const staleKnownAccounts = [
+                  ...updatedConnectedAccounts.filter((account) => account.email !== message.accountEmail),
+                  { ...reconnectedAccount, status: "login_required" }
+                ];
+                window.__simpleTrackConnectedAccounts = updatedConnectedAccounts;
+                window.__simpleTrackKnownAccounts = staleKnownAccounts;
+                callback({
+                  ok: true,
+                  connectedAccounts: updatedConnectedAccounts,
+                  knownAccounts: staleKnownAccounts,
+                  activeAccountEmail: message.accountEmail,
+                  accountStatus: {
+                    status: "connected",
+                    accountEmail: message.accountEmail,
+                    connectedAccounts: updatedConnectedAccounts,
+                    knownAccounts: staleKnownAccounts,
+                    account: reconnectedAccount
+                  }
+                });
+                return;
+              }
+
               if (message?.type === "simpleTrack:getConnectedAccounts") {
                 callback({
                   ok: true,
                   extensionId,
                   connectedAccounts,
-                  knownAccounts: connectedAccounts,
+                  knownAccounts: window.__simpleTrackKnownAccounts || connectedAccounts,
                   activeAccountEmail: "s.stadnek96@gmail.com"
                 });
                 return;
@@ -219,7 +257,8 @@ async function runBrowserChecks() {
                 customToken: `harness-token-${message.accountEmail}`,
                 accountEmail: message.accountEmail,
                 activeAccountEmail: message.accountEmail,
-                connectedAccounts
+                connectedAccounts,
+                knownAccounts: window.__simpleTrackKnownAccounts || connectedAccounts
               });
             }, 0);
           }
@@ -509,15 +548,36 @@ async function runBrowserChecks() {
       const menuText = await page.locator(".profile-menu").innerText();
       throw new Error(`signed-out account should stay in the web app account menu as a login-required row; count=${loginRequiredRowCount}; menu=${menuText}; state=${JSON.stringify(state)}`);
     }
+    const startConnectionCountBefore = await page.evaluate(() => (
+      (window.__simpleTrackExternalRequests || []).filter((request) => request.type === "simpleTrack:startAccountConnection").length
+    ));
     await page.getByRole("button", { name: "Log back in to spencer.tpp@gmail.com" }).click();
     await page.waitForFunction(() => (
       window.__simpleTrackExternalRequests || []
-    ).some((request) => request.type === "simpleTrack:startAccountConnection" && request.accountEmail === "spencer.tpp@gmail.com"));
-    const webReconnectRequest = await page.evaluate(() => (
+    ).some((request) => request.type === "simpleTrack:connectSignedInAccount" && request.accountEmail === "spencer.tpp@gmail.com"));
+    const reconnectRequest = await page.evaluate(() => (
       window.__simpleTrackExternalRequests || []
-    ).find((request) => request.type === "simpleTrack:startAccountConnection" && request.accountEmail === "spencer.tpp@gmail.com"));
-    assert.equal(webReconnectRequest.source, "web-app", "web app login-required reconnects should identify the web-app source");
-    assert.match(webReconnectRequest.returnUrl, /simpleTrack\.activeMailAccount|accountEmail=spencer\.tpp@gmail\.com|page=/, "web app login-required reconnects should return to the web app");
+    ).find((request) => request.type === "simpleTrack:connectSignedInAccount" && request.accountEmail === "spencer.tpp@gmail.com"));
+    assert.ok(reconnectRequest, "web app login-required reconnects should finish through the extension without the connect page");
+    const startConnectionCountAfter = await page.evaluate(() => (
+      (window.__simpleTrackExternalRequests || []).filter((request) => request.type === "simpleTrack:startAccountConnection").length
+    ));
+    assert.equal(startConnectionCountAfter, startConnectionCountBefore, "web app Log back in should not open the extension connection page");
+    await waitForAuthorizedDashboardRequest(dashboardAuthRequests, "spencer.tpp@gmail.com", "spencer.tpp@gmail.com");
+    await page.waitForSelector("text=Spencer Stadnek's workspace");
+    await page.waitForSelector("text=TPP account follow-up");
+    await page.locator(".profile-button").click();
+    assert.equal(
+      await page.getByRole("button", { name: "Log back in to spencer.tpp@gmail.com" }).count(),
+      0,
+      "a reconnected account must not keep rendering as login-required when stale knownAccounts say otherwise"
+    );
+    const reconnectedActiveText = await page.locator(".mail-account-row.is-active").innerText();
+    assert.match(reconnectedActiveText, /spencer\.tpp@gmail\.com[\s\S]*Active/, "reconnected account row should be active");
+    await assertActiveAccountBadge(page, "spencer.tpp@gmail.com");
+    await page.getByRole("button", { name: "Switch to s.stadnek96@gmail.com" }).click();
+    await waitForAuthorizedDashboardRequest(dashboardAuthRequests, "s.stadnek96@gmail.com", "s.stadnek96@gmail.com");
+    await page.waitForSelector("text=Question About Lawncare");
 
     await page.getByRole("button", { name: "Email tracking" }).first().click();
     await page.waitForSelector("h1:text('Email tracking')");
