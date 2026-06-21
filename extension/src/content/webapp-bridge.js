@@ -7,7 +7,8 @@ const SIMPLE_TRACK_WEB_REQUESTS = new Set([
   "simpleTrack:createWebAppSession",
   "simpleTrack:getConnectedAccounts",
   "simpleTrack:disconnectAccount",
-  "simpleTrack:startAccountConnection"
+  "simpleTrack:startAccountConnection",
+  "simpleTrack:refreshAccountConnection"
 ]);
 
 let extensionContextInvalidated = false;
@@ -37,10 +38,10 @@ window.addEventListener("message", (event) => {
 if (globalThis.chrome?.runtime?.onMessage) {
   try {
     chrome.runtime.onMessage.addListener((message) => {
-      if (message?.type !== "simpleTrack:accountDisconnected") return false;
+      if (!["simpleTrack:accountDisconnected", "simpleTrack:accountConnectionChanged"].includes(message?.type)) return false;
 
       const eventDetail = {
-        type: "simpleTrack:accountDisconnected",
+        type: message.type,
         accountEmail: message.accountEmail || "",
         connectedAccounts: message.connectedAccounts || [],
         knownAccounts: message.knownAccounts || [],

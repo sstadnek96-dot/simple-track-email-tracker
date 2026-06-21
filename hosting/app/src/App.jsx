@@ -123,6 +123,15 @@ function clearRouteExtensionContext() {
   window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
+function getWebAppReturnUrl() {
+  if (typeof window === "undefined") return "";
+
+  const url = new URL(window.location.href);
+  url.hash = "";
+  url.searchParams.delete("harness");
+  return url.toString();
+}
+
 function normalizeHandoffTokens(context) {
   const tokens = {};
   const rawTokens = context?.handoffTokens && typeof context.handoffTokens === "object" ? context.handoffTokens : {};
@@ -463,10 +472,12 @@ function App() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [switchingAccountEmail, setSwitchingAccountEmail] = useState("");
   const [extensionSessionContext, setExtensionSessionContext] = useState(() => (
     mergeExtensionContexts(readStoredExtensionContext(), routeParams.extensionContext)
   ));
   const dashboardRequestRef = useRef(0);
+  const skipNextUserWorkspaceLoadRef = useRef(false);
   const allowHarness = harnessAllowed();
   const isConnectPage = window.location.pathname === "/connect-extension";
   const profileAccounts = useMemo(
@@ -503,6 +514,10 @@ function App() {
 
   useEffect(() => {
     if (!user) return;
+    if (skipNextUserWorkspaceLoadRef.current) {
+      skipNextUserWorkspaceLoadRef.current = false;
+      return;
+    }
     loadWorkspace();
   }, [user]);
 
@@ -563,17 +578,29 @@ function App() {
       }
     }
 
+    function handleConnectionChangedMessage(message = {}) {
+      const accountEmail = normalizeAccountEmail(message.accountEmail);
+      if (!accountEmail) return;
+
+      rememberExtensionSession({
+        activeAccountEmail: message.activeAccountEmail || accountEmail,
+        connectedAccounts: Array.isArray(message.connectedAccounts) ? message.connectedAccounts : [],
+        knownAccounts: Array.isArray(message.knownAccounts) ? message.knownAccounts : []
+      });
+    }
+
     function handleExtensionEvent(event) {
       if (event.origin !== window.location.origin) return;
       const message = event.data || {};
-      if (message.source !== "simple-track-extension-event" || message.type !== "simpleTrack:accountDisconnected") return;
-      handleDisconnectedMessage(message);
+      if (message.source !== "simple-track-extension-event") return;
+      if (message.type === "simpleTrack:accountDisconnected") handleDisconnectedMessage(message);
+      if (message.type === "simpleTrack:accountConnectionChanged") handleConnectionChangedMessage(message);
     }
 
     function handleExtensionCustomEvent(event) {
       const message = event.detail || {};
-      if (message.type !== "simpleTrack:accountDisconnected") return;
-      handleDisconnectedMessage(message);
+      if (message.type === "simpleTrack:accountDisconnected") handleDisconnectedMessage(message);
+      if (message.type === "simpleTrack:accountConnectionChanged") handleConnectionChangedMessage(message);
     }
 
     window.addEventListener("message", handleExtensionEvent);
@@ -670,9 +697,10 @@ function App() {
     }, { replace: true });
   }
 
-  async function loadWorkspace(accountEmailOverride = "") {
+  async function loadWorkspace(accountEmailOverride = "", options = {}) {
+    const showLoading = options.showLoading !== false;
     const requestId = ++dashboardRequestRef.current;
-    setLoading(true);
+    if (showLoading) setLoading(true);
     setError("");
     try {
       const preferredAccount = accountEmailOverride || routeParams.accountEmail || readStoredActiveMailAccount() || activeMailAccount;
@@ -704,7 +732,7 @@ function App() {
         setError(loadError.message);
       }
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }
 
@@ -742,7 +770,7 @@ function App() {
     }
   }
 
-  async function signInFromExtensionHandoff(customToken, accountEmail = "") {
+  async function signInFromExtensionHandoff(customToken, accountEmail = "", options = {}) {
     setError("");
     try {
       if (allowHarness && String(customToken).startsWith("harness-token")) {
@@ -752,6 +780,7 @@ function App() {
           displayName: normalizedEmail === "spencer.tpp@gmail.com" ? "Spencer Stadnek" : "Spencer Davidson"
         });
         window.__simpleTrackHarnessAuthEmail = harnessUser.email;
+        if (options.skipWorkspaceLoad) skipNextUserWorkspaceLoadRef.current = true;
         setUser(harnessUser);
         setBootstrap(mockBootstrap);
         setData(mockDashboard);
@@ -768,6 +797,7 @@ function App() {
 
       const result = await signInWithCustomToken(auth, customToken);
       const nextUser = toUser(result.user);
+      if (options.skipWorkspaceLoad) skipNextUserWorkspaceLoadRef.current = true;
       setUser(nextUser);
       if (accountEmail) {
         setAppRouteState({
@@ -784,7 +814,7 @@ function App() {
     }
   }
 
-  async function signInToMailAccount(accountEmail = "") {
+  async function signInToMailAccount(accountEmail = "", options = {}) {
     const normalizedEmail = normalizeAccountEmail(accountEmail);
     if (!normalizedEmail) return;
 
@@ -794,12 +824,16 @@ function App() {
         activeAccountEmail: normalizedEmail,
         connectedAccounts: session.connectedAccounts || []
       });
-      return signInFromExtensionHandoff(session.customToken, normalizedEmail);
+      return signInFromExtensionHandoff(session.customToken, normalizedEmail, {
+        skipWorkspaceLoad: options.skipWorkspaceLoad
+      });
     }
 
     const existingToken = getHandoffToken(extensionSessionContext, normalizedEmail);
     if (existingToken) {
-      return signInFromExtensionHandoff(existingToken, normalizedEmail);
+      return signInFromExtensionHandoff(existingToken, normalizedEmail, {
+        skipWorkspaceLoad: options.skipWorkspaceLoad
+      });
     }
 
     return null;
@@ -841,12 +875,27 @@ function App() {
       type: "simpleTrack:startAccountConnection",
       accountEmail: normalizedEmail,
       client: accountRecord.client || getMailClientLabel(accountRecord),
-      returnUrl: "",
+      returnUrl: getWebAppReturnUrl(),
+      source: "web-app",
       openOnly: true
     };
 
     return firstSuccessfulExtensionResponse([
       requestExtensionBridge("simpleTrack:startAccountConnection", payload),
+      requestExtensionExternal(payload)
+    ]);
+  }
+
+  function requestExtensionRefreshAccountConnection(accountEmail = "") {
+    const normalizedEmail = normalizeAccountEmail(accountEmail);
+    if (!normalizedEmail) return Promise.resolve(null);
+    const payload = {
+      type: "simpleTrack:refreshAccountConnection",
+      accountEmail: normalizedEmail
+    };
+
+    return firstSuccessfulExtensionResponse([
+      requestExtensionBridge("simpleTrack:refreshAccountConnection", payload),
       requestExtensionExternal(payload)
     ]);
   }
@@ -902,7 +951,8 @@ function App() {
     rememberExtensionSession({
       extensionId: response.extensionId || "",
       activeAccountEmail: response.activeAccountEmail || "",
-      connectedAccounts: response.connectedAccounts || []
+      connectedAccounts: response.connectedAccounts || [],
+      knownAccounts: response.knownAccounts || []
     });
   }
 
@@ -965,9 +1015,11 @@ function App() {
   function loginHarness(overrides = {}) {
     setError("");
     const overrideEmail = normalizeAccountEmail(overrides.email);
+    const routeEmail = normalizeAccountEmail(routeParams.accountEmail);
+    const harnessEmail = overrideEmail || routeEmail || normalizeAccountEmail(overrides.email);
     const harnessUser = createHarnessUser({
       ...overrides,
-      email: overrideEmail || overrides.email
+      email: harnessEmail || overrides.email
     });
     window.__simpleTrackHarnessAuthEmail = harnessUser.email;
     setUser(harnessUser);
@@ -1105,21 +1157,31 @@ function App() {
       (extensionContextHasAccount(extensionSessionContext, normalizedEmail) || account?.status === "browser_connected");
 
     if (canUseExtensionSession && normalizedEmail !== currentUserEmail) {
-      const switchedUser = await signInToMailAccount(normalizedEmail);
-      if (switchedUser) {
-        await loadWorkspace(nextAccount);
+      setSwitchingAccountEmail(normalizedEmail);
+      try {
+        const switchedUser = await signInToMailAccount(normalizedEmail, { skipWorkspaceLoad: true });
+        if (switchedUser) {
+          await loadWorkspace(nextAccount, { showLoading: false });
+          return;
+        }
+        setAppRouteState({
+          page: activePage,
+          accountEmail: currentUserEmail || activeMailAccount,
+          messageId: ""
+        }, { replace: true });
         return;
+      } finally {
+        setSwitchingAccountEmail("");
       }
-      setAppRouteState({
-        page: activePage,
-        accountEmail: currentUserEmail || activeMailAccount,
-        messageId: ""
-      }, { replace: true });
-      return;
     } else if (account?.status === "browser_connected" && normalizedEmail !== currentUserEmail) {
-      const switchedUser = await signInToMailAccount(normalizedEmail);
-      if (switchedUser) {
-        await loadWorkspace(nextAccount);
+      setSwitchingAccountEmail(normalizedEmail);
+      try {
+        const switchedUser = await signInToMailAccount(normalizedEmail, { skipWorkspaceLoad: true });
+        if (switchedUser) {
+          await loadWorkspace(nextAccount, { showLoading: false });
+        }
+      } finally {
+        setSwitchingAccountEmail("");
       }
       return;
     }
@@ -1175,6 +1237,7 @@ function App() {
         loginHarness={loginHarness}
         getToken={getToken}
         logout={logout}
+        refreshExtensionAccountConnection={requestExtensionRefreshAccountConnection}
       />
     );
   }
@@ -1237,6 +1300,7 @@ function App() {
                   user={user}
                   accounts={enrichedProfileAccounts}
                   activeMailAccount={activeMailAccount}
+                  switchingAccountEmail={switchingAccountEmail}
                   onSwitchAccount={switchMailAccount}
                   onChangeLogin={changeAppLogin}
                   onOpenSettings={openSettingsPage}
@@ -1260,7 +1324,13 @@ function App() {
         </section>
 
         {error ? <div className="error-banner">{error}</div> : null}
-        {loading ? <LoadingState /> : pageContent}
+        {switchingAccountEmail ? (
+          <div className="account-switch-banner">
+            <Loader2 className="spin" size={16} />
+            Switching to {switchingAccountEmail}
+          </div>
+        ) : null}
+        {loading && !data ? <LoadingState /> : pageContent}
       </main>
 
       {!user && authReady ? (
@@ -1427,6 +1497,7 @@ function ProfileMenu({
   user,
   accounts = [],
   activeMailAccount,
+  switchingAccountEmail,
   onSwitchAccount,
   onChangeLogin,
   onOpenSettings,
@@ -1462,6 +1533,8 @@ function ProfileMenu({
             key={account.email}
             account={account}
             active={normalizeAccountEmail(activeMailAccount) === account.email}
+            switching={normalizeAccountEmail(switchingAccountEmail) === account.email}
+            switchLocked={Boolean(switchingAccountEmail)}
             onSwitchAccount={onSwitchAccount}
             onChangeLogin={onChangeLogin}
           />
@@ -1478,11 +1551,13 @@ function ProfileMenu({
   );
 }
 
-function MailAccountRow({ account, active, onSwitchAccount, onChangeLogin }) {
+function MailAccountRow({ account, active, switching, switchLocked, onSwitchAccount, onChangeLogin }) {
   const connected = account.status === "connected";
   const browserConnected = account.status === "browser_connected";
   const needsLoginSwitch = account.status === "login_required";
-  const label = active
+  const label = switching
+    ? "Switching"
+    : active
     ? "Active"
     : connected
       ? "Switch"
@@ -1502,7 +1577,9 @@ function MailAccountRow({ account, active, onSwitchAccount, onChangeLogin }) {
         !connected && !browserConnected && !needsLoginSwitch ? "is-pending" : ""
       ].filter(Boolean).join(" ")}
       type="button"
+      disabled={switchLocked && !switching}
       onClick={() => {
+        if (switchLocked) return;
         if (connected || browserConnected) {
           onSwitchAccount(account.email);
           return;
@@ -1516,7 +1593,10 @@ function MailAccountRow({ account, active, onSwitchAccount, onChangeLogin }) {
         <strong>{account.displayName || account.email}</strong>
         <small>{secondaryText}</small>
       </span>
-      <span className="account-state">{label}</span>
+      <span className="account-state">
+        {switching ? <Loader2 className="spin" size={13} /> : null}
+        {label}
+      </span>
     </button>
   );
 }
@@ -1693,7 +1773,21 @@ function getSafeMailReturnUrl(value, account) {
   }
 }
 
-function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, login, loginHarness, getToken, logout }) {
+function getSafeConnectionReturnUrl(value, account) {
+  const mailReturnUrl = getSafeMailReturnUrl(value, account);
+  if (mailReturnUrl) return mailReturnUrl;
+
+  try {
+    const url = new URL(String(value || ""), window.location.origin);
+    return url.origin === window.location.origin && url.pathname !== "/connect-extension"
+      ? url.toString()
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, login, loginHarness, getToken, logout, refreshExtensionAccountConnection }) {
   const [params, setParams] = useState(() => readConnectionParams());
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
@@ -1711,7 +1805,7 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
   });
   const MailProviderLogo = mailProvider === "microsoft" ? OutlookLogo : GmailLogo;
   const returnAccount = { email: requestedEmail, client: params.client, provider: params.provider };
-  const returnUrl = getSafeMailReturnUrl(params.returnUrl, returnAccount) || getMailClientHomeUrl(returnAccount);
+  const returnUrl = getSafeConnectionReturnUrl(params.returnUrl, returnAccount) || getMailClientHomeUrl(returnAccount);
   const isReconnect = params.mode === "reconnect";
   const signedInEmail = normalizeAccountEmail(user?.email);
   const accountMatchesWebLogin = Boolean(user && requestedEmail && signedInEmail === requestedEmail);
@@ -1785,6 +1879,14 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
         accountDisplayName: accountMatchesWebLogin ? (user?.displayName || requestedEmail) : requestedEmail,
         accountPhotoURL: accountMatchesWebLogin ? (user?.photoURL || "") : ""
       });
+      const refreshed = await refreshExtensionAccountConnection?.(requestedEmail);
+      if (refreshed?.ok) {
+        writeStoredExtensionContext(mergeExtensionContexts(readStoredExtensionContext(), {
+          activeAccountEmail: refreshed.activeAccountEmail || requestedEmail,
+          connectedAccounts: refreshed.connectedAccounts || [],
+          knownAccounts: refreshed.knownAccounts || []
+        }));
+      }
       setConnectedAccount(response.account);
       setStatus("connected");
       setMessage(`${requestedEmail} is connected. You can return to ${mailClientLabel}.`);
@@ -1820,12 +1922,12 @@ function ConnectExtensionPage({ user, authReady, allowHarness, error, setError, 
     : user ? `Connect this ${mailClientLabel}` : `Continue with ${mailClientLabel}`;
 
   useEffect(() => {
-    if (!isConnected || allowHarness || params.source !== "chrome-extension") return undefined;
+    if (!isConnected || allowHarness || !returnUrl) return undefined;
     const timeout = window.setTimeout(() => {
       window.location.assign(returnUrl);
     }, 900);
     return () => window.clearTimeout(timeout);
-  }, [allowHarness, isConnected, params.source, returnUrl]);
+  }, [allowHarness, isConnected, returnUrl]);
 
   return (
     <main className="connect-page">

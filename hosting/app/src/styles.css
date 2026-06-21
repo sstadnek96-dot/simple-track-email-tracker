@@ -360,6 +360,11 @@ p {
   background: #f8fbff;
 }
 
+.mail-account-row:disabled {
+  cursor: wait;
+  opacity: 0.74;
+}
+
 .mail-account-row.is-active {
   background: #f6fff9;
   box-shadow: inset 4px 0 0 var(--green);
@@ -475,6 +480,9 @@ p {
 }
 
 .account-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 4px 8px;
   color: var(--blue);
   background: #edf3ff;
@@ -509,6 +517,21 @@ p {
   color: #667085;
   text-align: center;
   font-size: 12px;
+}
+
+.account-switch-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  color: #075985;
+  background: #eaf6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 900;
 }
 
 .account-switcher {

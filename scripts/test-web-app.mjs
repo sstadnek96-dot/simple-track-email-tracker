@@ -126,7 +126,13 @@ async function runBrowserChecks() {
           lastError: null,
           sendMessage(extensionId, message, callback) {
             window.__simpleTrackExternalRequests = window.__simpleTrackExternalRequests || [];
-            window.__simpleTrackExternalRequests.push({ extensionId, type: message?.type || "", accountEmail: message?.accountEmail || "" });
+            window.__simpleTrackExternalRequests.push({
+              extensionId,
+              type: message?.type || "",
+              accountEmail: message?.accountEmail || "",
+              returnUrl: message?.returnUrl || "",
+              source: message?.source || ""
+            });
             setTimeout(() => {
               const connectedAccounts = [
                 {
@@ -170,9 +176,25 @@ async function runBrowserChecks() {
               if (message?.type === "simpleTrack:startAccountConnection") {
                 callback({
                   ok: true,
-                  connectUrl: `https://simple-track-prod-app.web.app/connect-extension#accountEmail=${encodeURIComponent(message.accountEmail)}&mode=reconnect`,
+                  connectUrl: `https://simple-track-prod-app.web.app/connect-extension#accountEmail=${encodeURIComponent(message.accountEmail)}&mode=reconnect&returnUrl=${encodeURIComponent(message.returnUrl || "")}&source=${encodeURIComponent(message.source || "")}`,
                   accountStatus: {
                     status: "login_required",
+                    accountEmail: message.accountEmail,
+                    connectedAccounts,
+                    knownAccounts: connectedAccounts
+                  }
+                });
+                return;
+              }
+
+              if (message?.type === "simpleTrack:refreshAccountConnection") {
+                callback({
+                  ok: true,
+                  connectedAccounts,
+                  knownAccounts: connectedAccounts,
+                  activeAccountEmail: message.accountEmail,
+                  accountStatus: {
+                    status: "connected",
                     accountEmail: message.accountEmail,
                     connectedAccounts,
                     knownAccounts: connectedAccounts
@@ -186,6 +208,7 @@ async function runBrowserChecks() {
                   ok: true,
                   extensionId,
                   connectedAccounts,
+                  knownAccounts: connectedAccounts,
                   activeAccountEmail: "s.stadnek96@gmail.com"
                 });
                 return;
@@ -490,6 +513,11 @@ async function runBrowserChecks() {
     await page.waitForFunction(() => (
       window.__simpleTrackExternalRequests || []
     ).some((request) => request.type === "simpleTrack:startAccountConnection" && request.accountEmail === "spencer.tpp@gmail.com"));
+    const webReconnectRequest = await page.evaluate(() => (
+      window.__simpleTrackExternalRequests || []
+    ).find((request) => request.type === "simpleTrack:startAccountConnection" && request.accountEmail === "spencer.tpp@gmail.com"));
+    assert.equal(webReconnectRequest.source, "web-app", "web app login-required reconnects should identify the web-app source");
+    assert.match(webReconnectRequest.returnUrl, /simpleTrack\.activeMailAccount|accountEmail=spencer\.tpp@gmail\.com|page=/, "web app login-required reconnects should return to the web app");
 
     await page.getByRole("button", { name: "Email tracking" }).first().click();
     await page.waitForSelector("h1:text('Email tracking')");

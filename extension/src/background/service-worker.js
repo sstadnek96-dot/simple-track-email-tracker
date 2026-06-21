@@ -233,16 +233,26 @@ async function handleExternalMessage(message, sender = {}) {
 
   if (message?.type === "simpleTrack:getConnectedAccounts") {
     const connectedAccounts = await getConnectedAccounts();
+    const knownAccounts = await getKnownAccounts();
     return {
       ok: true,
       extensionId: chrome.runtime.id,
       connectedAccounts,
+      knownAccounts,
       activeAccountEmail: await getActiveAccountEmail()
     };
   }
 
   if (message?.type === "simpleTrack:disconnectAccount") {
     return disconnectAccount(message);
+  }
+
+  if (message?.type === "simpleTrack:startAccountConnection") {
+    return startAccountConnection(message);
+  }
+
+  if (message?.type === "simpleTrack:refreshAccountConnection") {
+    return refreshAccountConnection(message);
   }
 
   return { ok: false, error: "Unsupported Simple Track web app request." };
@@ -577,7 +587,8 @@ async function startAccountConnection(message) {
   const installSecret = await getInstallSecret();
   const accountEmail = normalizeEmail(message.accountEmail);
   const client = String(message.client || "Gmail");
-  const returnUrl = sanitizeMailReturnUrl(message.returnUrl || "");
+  const returnUrl = sanitizeConnectionReturnUrl(message.returnUrl || "");
+  const source = message.source === "web-app" ? "web-app" : "chrome-extension";
   const knownAccounts = await getKnownAccounts();
   const connectedAccounts = await getConnectedAccounts();
   const accountStatus = getAccountStatus(accountEmail, connectedAccounts, knownAccounts);
@@ -587,7 +598,7 @@ async function startAccountConnection(message) {
     return { ok: false, error: "Could not detect the active mail account." };
   }
 
-  const connectUrl = buildConnectUrl({ installId, installSecret, accountEmail, client, returnUrl, mode });
+  const connectUrl = buildConnectUrl({ installId, installSecret, accountEmail, client, returnUrl, mode, source });
 
   if (globalThis.chrome?.tabs?.create) {
     await chrome.tabs.create({ url: connectUrl, active: true });
@@ -618,8 +629,12 @@ async function refreshAccountConnection(message = {}) {
   const accountEmail = normalizeEmail(message.accountEmail || (await getActiveAccountEmail()));
   const status = await fetchInstallStatus(settings, installId, installSecret, accountEmail);
 
-  await saveInstallAccountState(status, accountEmail);
-  return { ok: true, ...status };
+  const saved = await saveInstallAccountState(status, accountEmail);
+  const result = { ok: true, ...status, ...saved };
+  notifyWebAppAccountConnectionChanged(accountEmail, result).catch((error) => {
+    console.warn("Simple Track could not notify web app account refresh", error);
+  });
+  return result;
 }
 
 async function selectAccount(message = {}) {
@@ -770,7 +785,7 @@ async function saveInstallAccountState(status = {}, fallbackActiveAccountEmail =
   };
 }
 
-function buildConnectUrl({ installId, installSecret, accountEmail, client, returnUrl = "", mode = "connect" }) {
+function buildConnectUrl({ installId, installSecret, accountEmail, client, returnUrl = "", mode = "connect", source = "chrome-extension" }) {
   const params = new URLSearchParams({
     installId,
     installSecret,
@@ -778,7 +793,7 @@ function buildConnectUrl({ installId, installSecret, accountEmail, client, retur
     client,
     provider: getProviderForClient(client),
     mode,
-    source: "chrome-extension"
+    source
   });
   if (returnUrl) params.set("returnUrl", returnUrl);
   const url = new URL(`${WEB_APP_URL}/connect-extension`);
@@ -788,6 +803,14 @@ function buildConnectUrl({ installId, installSecret, accountEmail, client, retur
 }
 
 async function notifyWebAppAccountDisconnected(accountEmail, state = {}) {
+  return notifyWebAppAccountState("simpleTrack:accountDisconnected", accountEmail, state);
+}
+
+async function notifyWebAppAccountConnectionChanged(accountEmail, state = {}) {
+  return notifyWebAppAccountState("simpleTrack:accountConnectionChanged", accountEmail, state);
+}
+
+async function notifyWebAppAccountState(type, accountEmail, state = {}) {
   if (!globalThis.chrome?.tabs?.query || !globalThis.chrome?.tabs?.sendMessage) return;
   const tabs = await chrome.tabs.query({
     url: [
@@ -798,7 +821,7 @@ async function notifyWebAppAccountDisconnected(accountEmail, state = {}) {
   await Promise.all(tabs.map((tab) => (
     tab.id
       ? chrome.tabs.sendMessage(tab.id, {
-          type: "simpleTrack:accountDisconnected",
+          type,
           accountEmail,
           connectedAccounts: state.connectedAccounts || [],
           knownAccounts: state.knownAccounts || [],
@@ -817,6 +840,20 @@ function sanitizeMailReturnUrl(value = "") {
       hostname === "outlook.office.com" ||
       hostname === "outlook.office365.com";
     return allowed ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function sanitizeConnectionReturnUrl(value = "") {
+  const mailReturnUrl = sanitizeMailReturnUrl(value);
+  if (mailReturnUrl) return mailReturnUrl;
+
+  try {
+    const url = new URL(String(value || ""));
+    return EXTERNAL_MESSAGE_ORIGINS.has(url.origin) && url.pathname !== "/connect-extension"
+      ? url.toString()
+      : "";
   } catch {
     return "";
   }
