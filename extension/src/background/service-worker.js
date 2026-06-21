@@ -606,6 +606,10 @@ async function startAccountConnection(message) {
     return { ok: false, error: "Could not detect the active mail account." };
   }
 
+  if (message.silentReconnect && message.idToken) {
+    return connectSignedInAccount(message);
+  }
+
   const connectUrl = buildConnectUrl({ installId, installSecret, accountEmail, client, returnUrl, mode, source });
 
   if (globalThis.chrome?.tabs?.create) {

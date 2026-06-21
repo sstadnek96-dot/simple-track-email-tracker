@@ -937,10 +937,26 @@ function App() {
       accountPhotoURL: signedInUser.photoURL || accountRecord.photoURL || ""
     };
 
-    return firstSuccessfulExtensionResponse([
+    const response = await firstSuccessfulExtensionResponse([
       requestExtensionBridge("simpleTrack:connectSignedInAccount", payload),
       requestExtensionExternal(payload)
     ]);
+    if (isConnectedExtensionResponse(response, normalizedEmail)) return response;
+
+    const fallbackPayload = {
+      ...payload,
+      type: "simpleTrack:startAccountConnection",
+      silentReconnect: true,
+      openOnly: true,
+      source: "web-app",
+      returnUrl: getWebAppReturnUrl()
+    };
+
+    const fallbackResponse = await firstSuccessfulExtensionResponse([
+      requestExtensionBridge("simpleTrack:startAccountConnection", fallbackPayload),
+      requestExtensionExternal(fallbackPayload)
+    ]);
+    return isConnectedExtensionResponse(fallbackResponse, normalizedEmail) ? fallbackResponse : response || fallbackResponse;
   }
 
   function requestExtensionExternal(payload) {
@@ -982,6 +998,13 @@ function App() {
         });
       }
     });
+  }
+
+  function isConnectedExtensionResponse(response, accountEmail = "") {
+    const normalizedEmail = normalizeAccountEmail(accountEmail);
+    if (!response?.ok || !normalizedEmail) return false;
+    if (response.accountStatus?.status === "connected" && normalizeAccountEmail(response.accountStatus.accountEmail) === normalizedEmail) return true;
+    return (response.connectedAccounts || []).some((account) => normalizeAccountEmail(account.email) === normalizedEmail);
   }
 
   async function refreshExtensionAccountsFromBridge() {
