@@ -179,41 +179,6 @@ async function runBrowserChecks() {
               }
 
               if (message?.type === "simpleTrack:startAccountConnection") {
-                if (message.silentReconnect && message.idToken) {
-                  const reconnectedAccount = {
-                    email: message.accountEmail,
-                    displayName: message.accountDisplayName || "Spencer Stadnek",
-                    photoURL: message.accountPhotoURL || "",
-                    provider: message.provider || "google",
-                    client: message.client || "Gmail",
-                    status: "connected"
-                  };
-                  const updatedConnectedAccounts = [
-                    ...connectedAccounts.filter((account) => account.email !== message.accountEmail),
-                    reconnectedAccount
-                  ];
-                  const staleKnownAccounts = [
-                    ...updatedConnectedAccounts.filter((account) => account.email !== message.accountEmail),
-                    { ...reconnectedAccount, status: "login_required" }
-                  ];
-                  window.__simpleTrackConnectedAccounts = updatedConnectedAccounts;
-                  window.__simpleTrackKnownAccounts = staleKnownAccounts;
-                  callback({
-                    ok: true,
-                    connectedAccounts: updatedConnectedAccounts,
-                    knownAccounts: staleKnownAccounts,
-                    activeAccountEmail: message.accountEmail,
-                    accountStatus: {
-                      status: "connected",
-                      accountEmail: message.accountEmail,
-                      connectedAccounts: updatedConnectedAccounts,
-                      knownAccounts: staleKnownAccounts,
-                      account: reconnectedAccount
-                    }
-                  });
-                  return;
-                }
-
                 callback({
                   ok: true,
                   connectUrl: `https://simple-track-prod-app.web.app/connect-extension#accountEmail=${encodeURIComponent(message.accountEmail)}&mode=reconnect&returnUrl=${encodeURIComponent(message.returnUrl || "")}&source=${encodeURIComponent(message.source || "")}`,
@@ -244,11 +209,6 @@ async function runBrowserChecks() {
               }
 
               if (message?.type === "simpleTrack:connectSignedInAccount") {
-                if (window.__simpleTrackForceLegacyReconnect) {
-                  callback({ ok: false, error: "Unsupported by injected bridge" });
-                  return;
-                }
-
                 const reconnectedAccount = {
                   email: message.accountEmail,
                   displayName: message.accountDisplayName || "Spencer Stadnek",
@@ -593,21 +553,18 @@ async function runBrowserChecks() {
     const startConnectionCountBefore = await page.evaluate(() => (
       (window.__simpleTrackExternalRequests || []).filter((request) => request.type === "simpleTrack:startAccountConnection").length
     ));
-    await page.evaluate(() => {
-      window.__simpleTrackForceLegacyReconnect = true;
-    });
     await page.getByRole("button", { name: "Log back in to spencer.tpp@gmail.com" }).click();
     await page.waitForFunction(() => (
       window.__simpleTrackExternalRequests || []
-    ).some((request) => request.type === "simpleTrack:startAccountConnection" && request.accountEmail === "spencer.tpp@gmail.com" && request.silentReconnect && request.hasIdToken));
+    ).some((request) => request.type === "simpleTrack:connectSignedInAccount" && request.accountEmail === "spencer.tpp@gmail.com" && request.hasIdToken));
     const reconnectRequest = await page.evaluate(() => (
       window.__simpleTrackExternalRequests || []
-    ).find((request) => request.type === "simpleTrack:startAccountConnection" && request.accountEmail === "spencer.tpp@gmail.com" && request.silentReconnect));
-    assert.ok(reconnectRequest?.hasIdToken, "web app login-required reconnect fallback should send a signed SSO token to the extension");
+    ).find((request) => request.type === "simpleTrack:connectSignedInAccount" && request.accountEmail === "spencer.tpp@gmail.com"));
+    assert.ok(reconnectRequest?.hasIdToken, "web app login-required reconnect should send a signed SSO token to the extension");
     const startConnectionCountAfter = await page.evaluate(() => (
       (window.__simpleTrackExternalRequests || []).filter((request) => request.type === "simpleTrack:startAccountConnection").length
     ));
-    assert.equal(startConnectionCountAfter, startConnectionCountBefore + 1, "web app Log back in should use one silent extension reconnect fallback");
+    assert.equal(startConnectionCountAfter, startConnectionCountBefore, "web app Log back in should not open the extension connection page");
     await waitForAuthorizedDashboardRequest(dashboardAuthRequests, "spencer.tpp@gmail.com", "spencer.tpp@gmail.com");
     await page.waitForSelector("text=Spencer Stadnek's workspace");
     await page.waitForSelector("text=TPP account follow-up");

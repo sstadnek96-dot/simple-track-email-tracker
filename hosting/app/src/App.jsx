@@ -941,22 +941,7 @@ function App() {
       requestExtensionBridge("simpleTrack:connectSignedInAccount", payload),
       requestExtensionExternal(payload)
     ]);
-    if (isConnectedExtensionResponse(response, normalizedEmail)) return response;
-
-    const fallbackPayload = {
-      ...payload,
-      type: "simpleTrack:startAccountConnection",
-      silentReconnect: true,
-      openOnly: true,
-      source: "web-app",
-      returnUrl: getWebAppReturnUrl()
-    };
-
-    const fallbackResponse = await firstSuccessfulExtensionResponse([
-      requestExtensionBridge("simpleTrack:startAccountConnection", fallbackPayload),
-      requestExtensionExternal(fallbackPayload)
-    ]);
-    return isConnectedExtensionResponse(fallbackResponse, normalizedEmail) ? fallbackResponse : response || fallbackResponse;
+    return isConnectedExtensionResponse(response, normalizedEmail) ? response : null;
   }
 
   function requestExtensionExternal(payload) {
@@ -1290,7 +1275,7 @@ function App() {
 
           const response = await requestExtensionConnectSignedInAccount(account, signedInUser);
           if (!response?.ok) {
-            setError(response?.error || "Simple Track could not reconnect this account to the extension. Reload Gmail and try again.");
+            setError(response?.error || "Simple Track could not reconnect this account to the extension. Reload the unpacked extension, refresh this web app, and try again.");
             return;
           }
 
