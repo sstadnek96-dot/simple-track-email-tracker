@@ -162,11 +162,13 @@ async function testTrackingArmsPixelAndActivatesQuickly() {
 }
 
 async function testDuplicateSubjectsMapToDistinctRows() {
+  const midLastActivityAt = todayAt(13, 39);
   const messages = [
     createMessage("m-new", "test", todayAt(12, 55), 0, null, null),
-    createMessage("m-mid", "test", todayAt(12, 53), 2, "Chrome on Windows", todayAt(13, 39)),
+    createMessage("m-mid", "test", todayAt(12, 53), 2, "Chrome on Windows", midLastActivityAt),
     createMessage("m-old", "test", todayAt(12, 4), 4, "Firefox on Windows", todayAt(13, 26))
   ];
+  const midLastActivityLabel = hoverDateTime(midLastActivityAt);
 
   const page = await openGmailFixture(messages, `
     ${gmailRow("To: me", "test", "12:55 PM")}
@@ -191,7 +193,7 @@ async function testDuplicateSubjectsMapToDistinctRows() {
   await page.locator(".simple-track-row-badge").nth(1).hover();
   await page.waitForFunction(() => document.querySelector(".simple-track-hover-card")?.innerText.includes("2 opens"));
   hoverText = await page.locator(".simple-track-hover-card").innerText();
-  if (!hoverText.includes("2 opens") || !hoverText.includes("20 Jun, 13:39")) {
+  if (!hoverText.includes("2 opens") || !hoverText.includes(midLastActivityLabel)) {
     throw new Error(`Second hover card did not replace the first card:\n${hoverText}`);
   }
 
@@ -221,7 +223,7 @@ async function testDuplicateSubjectsMapToDistinctRows() {
   await page.mouse.move(overlayPoint.x, overlayPoint.y);
   await page.waitForFunction(() => document.querySelector(".simple-track-hover-card")?.innerText.includes("2 opens"));
   hoverText = await page.locator(".simple-track-hover-card").innerText();
-  if (!hoverText.includes("2 opens") || !hoverText.includes("20 Jun, 13:39")) {
+  if (!hoverText.includes("2 opens") || !hoverText.includes(midLastActivityLabel)) {
     throw new Error(`Coordinate hover did not work through an overlay:\n${hoverText}`);
   }
 
@@ -453,6 +455,16 @@ function gmailTime(date) {
     hour: "numeric",
     minute: "2-digit",
     hour12: true
+  }).format(date);
+}
+
+function hoverDateTime(date) {
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
   }).format(date);
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getAdditionalUserInfo, GoogleAuthProvider, onAuthStateChanged, signInWithCustomToken, signInWithPopup, signOut } from "firebase/auth";
 import {
   Activity,
@@ -256,17 +256,34 @@ function writeStoredActiveMailAccount(accountEmail = "") {
   }
 }
 
-function syncAccountEmailRoute(accountEmail = "") {
-  if (typeof window === "undefined" || !window.history?.replaceState) return;
+function normalizePageId(pageId = "") {
+  return NAV.some((item) => item.id === pageId) ? pageId : "activity";
+}
 
-  const normalizedEmail = normalizeAccountEmail(accountEmail);
+function writeAppRoute({ page = "", accountEmail = "", messageId = "" } = {}, { replace = false } = {}) {
+  if (typeof window === "undefined" || !window.history) return;
+
   const url = new URL(window.location.href);
+  const nextPage = normalizePageId(page);
+  const normalizedEmail = normalizeAccountEmail(accountEmail);
+  const normalizedMessageId = String(messageId || "");
+
+  url.searchParams.set("page", normalizedMessageId ? "email" : nextPage);
   if (normalizedEmail && normalizedEmail !== "all") {
     url.searchParams.set("accountEmail", normalizedEmail);
   } else {
     url.searchParams.delete("accountEmail");
   }
-  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  if (normalizedMessageId) {
+    url.searchParams.set("messageId", normalizedMessageId);
+  } else {
+    url.searchParams.delete("messageId");
+  }
+
+  const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+  if (nextUrl === `${window.location.pathname}${window.location.search}${window.location.hash}`) return;
+  const method = replace ? "replaceState" : "pushState";
+  window.history[method](window.history.state, "", nextUrl);
 }
 
 function decodeRouteContext(encoded) {
@@ -395,7 +412,7 @@ function createHarnessUser() {
 }
 
 function App() {
-  const [routeParams] = useState(() => readAppRouteParams());
+  const [routeParams, setRouteParams] = useState(() => readAppRouteParams());
   const [authReady, setAuthReady] = useState(false);
   const [user, setUser] = useState(null);
   const [bootstrap, setBootstrap] = useState(null);
@@ -411,16 +428,23 @@ function App() {
   const [extensionSessionContext, setExtensionSessionContext] = useState(() => (
     mergeExtensionContexts(readStoredExtensionContext(), routeParams.extensionContext)
   ));
+  const dashboardRequestRef = useRef(0);
   const allowHarness = harnessAllowed();
   const isConnectPage = window.location.pathname === "/connect-extension";
   const profileAccounts = useMemo(
-    () => mergeProfileAccounts(
-      data?.connectedAccounts || bootstrap?.connectedAccounts || [],
-      [
-        ...(extensionSessionContext?.connectedAccounts || []),
-        ...(extensionSessionContext?.knownAccounts || [])
-      ]
-    ),
+    () => {
+      const extensionConnectedAccounts = extensionSessionContext?.connectedAccounts || [];
+      const connectedEmails = new Set(extensionConnectedAccounts.map((account) => normalizeAccountEmail(account.email)).filter(Boolean));
+      const extensionKnownAccounts = (extensionSessionContext?.knownAccounts || [])
+        .filter((account) => !connectedEmails.has(normalizeAccountEmail(account.email)));
+      return mergeProfileAccounts(
+        data?.connectedAccounts || bootstrap?.connectedAccounts || [],
+        [
+          ...extensionConnectedAccounts,
+          ...extensionKnownAccounts
+        ]
+      );
+    },
     [data?.connectedAccounts, bootstrap?.connectedAccounts, extensionSessionContext]
   );
   const enrichedProfileAccounts = useMemo(
@@ -445,12 +469,33 @@ function App() {
   }, [user]);
 
   useEffect(() => {
+    if (isConnectPage) return;
     writeStoredActiveMailAccount(activeMailAccount);
-  }, [activeMailAccount]);
+    writeAppRoute({
+      page: activePage,
+      accountEmail: activeMailAccount,
+      messageId: focusedMessageId
+    }, { replace: true });
+  }, [activeMailAccount, activePage, focusedMessageId, isConnectPage]);
 
   useEffect(() => {
     refreshExtensionAccountsFromBridge();
   }, []);
+
+  useEffect(() => {
+    function handlePopState() {
+      const nextRoute = readAppRouteParams();
+      const nextAccount = nextRoute.accountEmail || "all";
+      setRouteParams(nextRoute);
+      setActivePage(nextRoute.focusedMessageId ? "email" : nextRoute.activePage);
+      setFocusedMessageId(nextRoute.focusedMessageId);
+      setActiveMailAccount(nextAccount);
+      if (user) refreshDashboardForAccount(nextAccount);
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [user]);
 
   useEffect(() => {
     function handleDisconnectedMessage(message = {}) {
@@ -471,8 +516,11 @@ function App() {
       }
 
       if (normalizeAccountEmail(activeMailAccount) === disconnectedEmail) {
-        setActiveMailAccount(nextEmail);
-        syncAccountEmailRoute(nextEmail);
+        setAppRouteState({
+          page: activePage,
+          accountEmail: nextEmail,
+          messageId: ""
+        }, { replace: true });
         refreshDashboardForAccount(nextEmail);
       }
     }
@@ -510,7 +558,7 @@ function App() {
   useEffect(() => {
     if (!authReady) return;
     if (!hasExtensionContext(extensionSessionContext)) return;
-    const requestedEmail = extensionSessionContext.handoffAccountEmail || routeParams.accountEmail;
+    const requestedEmail = routeParams.accountEmail || extensionSessionContext.handoffAccountEmail;
     if (!requestedEmail) return;
     if (!extensionContextHasAccount(extensionSessionContext, requestedEmail)) return;
     const loggedInEmail = normalizeAccountEmail(user?.email);
@@ -529,7 +577,54 @@ function App() {
     return normalizedEmail;
   }
 
+  function setAppRouteState({ page = activePage, accountEmail = activeMailAccount, messageId = focusedMessageId } = {}, options = {}) {
+    const normalizedMessageId = String(messageId || "");
+    const nextPage = normalizePageId(normalizedMessageId ? "email" : page);
+    const nextAccount = normalizeAccountEmail(accountEmail) || "all";
+    const nextMessageId = nextPage === "email" ? normalizedMessageId : "";
+
+    setActivePage(nextPage);
+    setActiveMailAccount(nextAccount);
+    setFocusedMessageId(nextMessageId);
+    setRouteParams((current) => ({
+      ...current,
+      activePage: nextPage,
+      accountEmail: nextAccount === "all" ? "" : nextAccount,
+      focusedMessageId: nextMessageId
+    }));
+    writeAppRoute({
+      page: nextPage,
+      accountEmail: nextAccount,
+      messageId: nextMessageId
+    }, options);
+  }
+
+  function navigatePage(pageId) {
+    setAppRouteState({
+      page: pageId,
+      accountEmail: activeMailAccount,
+      messageId: ""
+    });
+  }
+
+  function openMessageReport(messageId) {
+    setAppRouteState({
+      page: "email",
+      accountEmail: activeMailAccount,
+      messageId
+    });
+  }
+
+  function closeMessageReport() {
+    setAppRouteState({
+      page: "email",
+      accountEmail: activeMailAccount,
+      messageId: ""
+    }, { replace: true });
+  }
+
   async function loadWorkspace(accountEmailOverride = "") {
+    const requestId = ++dashboardRequestRef.current;
     setLoading(true);
     setError("");
     try {
@@ -539,25 +634,25 @@ function App() {
         fetchBootstrap(getToken),
         fetchDashboard(getToken, dashboardAccount)
       ]);
+      if (requestId !== dashboardRequestRef.current) return;
       setBootstrap(boot);
       setData(dashboard.data);
       const firstAccount = preferredAccount || dashboard.data?.connectedAccounts?.[0]?.email || boot.connectedAccounts?.[0]?.email || "all";
-      setActiveMailAccount((current) => {
-        const currentEmail = normalizeAccountEmail(current);
-        return currentEmail && currentEmail !== "all" ? currentEmail : firstAccount;
-      });
-      if (routeParams.focusedMessageId) setActivePage("email");
+      setAppRouteState({
+        page: routeParams.focusedMessageId ? "email" : activePage,
+        accountEmail: firstAccount,
+        messageId: routeParams.focusedMessageId
+      }, { replace: true });
     } catch (loadError) {
+      if (requestId !== dashboardRequestRef.current) return;
       if (allowHarness) {
         setBootstrap(mockBootstrap);
         setData(mockDashboard);
-        setActiveMailAccount((current) => {
-          const currentEmail = normalizeAccountEmail(current);
-          return currentEmail && currentEmail !== "all"
-            ? currentEmail
-            : routeParams.accountEmail || mockDashboard.connectedAccounts?.[0]?.email || "all";
-        });
-        if (routeParams.focusedMessageId) setActivePage("email");
+        setAppRouteState({
+          page: routeParams.focusedMessageId ? "email" : activePage,
+          accountEmail: routeParams.accountEmail || readStoredActiveMailAccount() || mockDashboard.connectedAccounts?.[0]?.email || "all",
+          messageId: routeParams.focusedMessageId
+        }, { replace: true });
       } else {
         setError(loadError.message);
       }
@@ -567,12 +662,15 @@ function App() {
   }
 
   async function refreshDashboardForAccount(accountEmail) {
+    const requestId = ++dashboardRequestRef.current;
     const dashboardAccount = getDashboardAccountParam(accountEmail);
     setError("");
     try {
       const dashboard = await fetchDashboard(getToken, dashboardAccount);
+      if (requestId !== dashboardRequestRef.current) return;
       setData(dashboard.data);
     } catch (refreshError) {
+      if (requestId !== dashboardRequestRef.current) return;
       setError(refreshError.message);
     }
   }
@@ -609,14 +707,26 @@ function App() {
         });
         setBootstrap(mockBootstrap);
         setData(mockDashboard);
-        if (normalizedEmail) setActiveMailAccount(normalizedEmail);
+        if (normalizedEmail) {
+          setAppRouteState({
+            page: activePage,
+            accountEmail: normalizedEmail,
+            messageId: focusedMessageId
+          }, { replace: true });
+        }
         return;
       }
 
       const result = await signInWithCustomToken(auth, customToken);
       const nextUser = toUser(result.user);
       setUser(nextUser);
-      if (accountEmail) setActiveMailAccount(normalizeAccountEmail(accountEmail));
+      if (accountEmail) {
+        setAppRouteState({
+          page: activePage,
+          accountEmail: normalizeAccountEmail(accountEmail),
+          messageId: focusedMessageId
+        }, { replace: true });
+      }
       return nextUser;
     } catch (sessionError) {
       setError(`Could not open ${accountEmail || "that account"} automatically. ${sessionError.message}`);
@@ -797,11 +907,11 @@ function App() {
     setUser(harnessUser);
     setBootstrap(mockBootstrap);
     setData(mockDashboard);
-    setActiveMailAccount(routeParams.accountEmail || overrideEmail || mockDashboard.connectedAccounts?.[0]?.email || "all");
-    if (routeParams.focusedMessageId) {
-      setActivePage("email");
-      setFocusedMessageId(routeParams.focusedMessageId);
-    }
+    setAppRouteState({
+      page: routeParams.focusedMessageId ? "email" : routeParams.activePage,
+      accountEmail: routeParams.accountEmail || overrideEmail || mockDashboard.connectedAccounts?.[0]?.email || "all",
+      messageId: routeParams.focusedMessageId
+    }, { replace: true });
   }
 
   async function logout() {
@@ -809,9 +919,8 @@ function App() {
     setUser(null);
     setBootstrap(null);
     setData(null);
-    setActiveMailAccount("all");
     writeStoredActiveMailAccount("");
-    syncAccountEmailRoute("");
+    setAppRouteState({ page: activePage, accountEmail: "all", messageId: "" }, { replace: true });
     if (auth.currentUser) await signOut(auth);
   }
 
@@ -835,8 +944,11 @@ function App() {
     const nextEmail = normalizeAccountEmail(response?.activeAccountEmail) || remainingAccounts[0]?.email || "";
 
     if (nextEmail) {
-      setActiveMailAccount(nextEmail);
-      syncAccountEmailRoute(nextEmail);
+      setAppRouteState({
+        page: activePage,
+        accountEmail: nextEmail,
+        messageId: ""
+      }, { replace: true });
       refreshDashboardForAccount(nextEmail);
       return;
     }
@@ -912,14 +1024,17 @@ function App() {
 
   function openSettingsPage() {
     setProfileOpen(false);
-    setActivePage("settings");
+    navigatePage("settings");
   }
 
   async function selectMailAccount(accountEmail, options = {}) {
     const normalizedEmail = normalizeAccountEmail(accountEmail);
     const nextAccount = normalizedEmail || "all";
-    setActiveMailAccount(nextAccount);
-    syncAccountEmailRoute(nextAccount);
+    setAppRouteState({
+      page: activePage,
+      accountEmail: nextAccount,
+      messageId: ""
+    });
     if (options.closeProfile) setProfileOpen(false);
     const account = enrichedProfileAccounts.find((entry) => entry.email === normalizedEmail);
     if (account?.status === "browser_connected") {
@@ -949,8 +1064,11 @@ function App() {
         return;
       }
 
-      setActiveMailAccount(normalizedEmail);
-      syncAccountEmailRoute(normalizedEmail);
+      setAppRouteState({
+        page: activePage,
+        accountEmail: normalizedEmail,
+        messageId: ""
+      });
       signInToMailAccount(normalizedEmail);
       return;
     }
@@ -983,7 +1101,8 @@ function App() {
       getToken={getToken}
       bootstrap={bootstrap}
       focusedMessageId={focusedMessageId}
-      setFocusedMessageId={setFocusedMessageId}
+      onOpenMessageReport={openMessageReport}
+      onCloseMessageReport={closeMessageReport}
     />
   ) : null;
 
@@ -991,7 +1110,7 @@ function App() {
     <div className="app-shell">
       <Sidebar
         activePage={activePage}
-        setActivePage={setActivePage}
+        onNavigatePage={navigatePage}
         drawerOpen={drawerOpen}
         setDrawerOpen={setDrawerOpen}
       />
@@ -1067,7 +1186,7 @@ function App() {
   );
 }
 
-function Sidebar({ activePage, setActivePage, drawerOpen, setDrawerOpen }) {
+function Sidebar({ activePage, onNavigatePage, drawerOpen, setDrawerOpen }) {
   const grouped = NAV.reduce((groups, item) => {
     groups[item.group] ||= [];
     groups[item.group].push(item);
@@ -1095,7 +1214,7 @@ function Sidebar({ activePage, setActivePage, drawerOpen, setDrawerOpen }) {
                   key={item.id}
                   type="button"
                   onClick={() => {
-                    setActivePage(item.id);
+                    onNavigatePage(item.id);
                     setDrawerOpen(false);
                   }}
                 >
@@ -1156,7 +1275,7 @@ function LoginModal({ error, allowHarness, login, loginHarness }) {
   );
 }
 
-function ProfileAccountSwitcher({ accounts = [], activeMailAccount, setActiveMailAccount }) {
+function ProfileAccountSwitcher({ accounts = [], activeMailAccount, onSwitchAccount }) {
   const normalizedAccounts = useMemo(() => {
     const byEmail = new Map();
     for (const account of accounts) {
@@ -1184,7 +1303,7 @@ function ProfileAccountSwitcher({ accounts = [], activeMailAccount, setActiveMai
   return (
     <label className="account-switcher">
       <span>Tracking account</span>
-      <select value={activeMailAccount || "all"} onChange={(event) => setActiveMailAccount(event.target.value)}>
+      <select value={activeMailAccount || "all"} onChange={(event) => onSwitchAccount(event.target.value)}>
         <option value="all">All connected accounts</option>
         {normalizedAccounts.map((account) => (
           <option key={account.email} value={account.email}>
@@ -1452,9 +1571,9 @@ function accountStatusRank(status) {
 }
 
 function getPreferredAccountStatus(currentStatus, nextStatus) {
+  if (currentStatus === "login_required" || nextStatus === "login_required") return "login_required";
   if (currentStatus === "connected" || nextStatus === "connected") return "connected";
   if (currentStatus === "browser_connected" || nextStatus === "browser_connected") return "browser_connected";
-  if (currentStatus === "login_required" || nextStatus === "login_required") return "login_required";
   return nextStatus || currentStatus || "connected";
 }
 
@@ -1706,7 +1825,7 @@ function readConnectionParams() {
   };
 }
 
-function PageRouter({ activePage, query, activeMailAccount, data, setData, getToken, bootstrap, focusedMessageId, setFocusedMessageId }) {
+function PageRouter({ activePage, query, activeMailAccount, data, setData, getToken, bootstrap, focusedMessageId, onOpenMessageReport, onCloseMessageReport }) {
   const scopedMessages = useMemo(() => filterByAccount(data.messages || [], activeMailAccount), [data.messages, activeMailAccount]);
   const scopedMessageIds = useMemo(() => new Set(scopedMessages.map((message) => message.id)), [scopedMessages]);
   const scopedActivity = useMemo(() => filterEventsByAccount(data.activity || [], activeMailAccount, scopedMessageIds), [data.activity, activeMailAccount, scopedMessageIds]);
@@ -1728,7 +1847,8 @@ function PageRouter({ activePage, query, activeMailAccount, data, setData, getTo
       <EmailTracking
         messages={filtered.messages}
         focusedMessageId={focusedMessageId}
-        setFocusedMessageId={setFocusedMessageId}
+        onOpenMessageReport={onOpenMessageReport}
+        onCloseMessageReport={onCloseMessageReport}
       />
     );
   }
@@ -1774,7 +1894,7 @@ function LatestActivity({ activity }) {
   );
 }
 
-function EmailTracking({ messages, focusedMessageId, setFocusedMessageId }) {
+function EmailTracking({ messages, focusedMessageId, onOpenMessageReport, onCloseMessageReport }) {
   const [sort, setSort] = useState("lastActivity");
   const rows = [...messages].sort((a, b) => {
     if (sort === "opens") return Number(b.opens || 0) - Number(a.opens || 0);
@@ -1809,14 +1929,14 @@ function EmailTracking({ messages, focusedMessageId, setFocusedMessageId }) {
             className="icon-button table-action"
             type="button"
             aria-label={`Open report for ${message.subject}`}
-            onClick={() => setFocusedMessageId(message.id)}
+            onClick={() => onOpenMessageReport(message.id)}
           >
             <MoreHorizontal size={18} />
           </button>
         ])}
       />
       {focusedMessage ? (
-        <MessageDetailDialog message={focusedMessage} onClose={() => setFocusedMessageId("")} />
+        <MessageDetailDialog message={focusedMessage} onClose={onCloseMessageReport} />
       ) : null}
     </section>
   );

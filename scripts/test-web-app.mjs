@@ -312,18 +312,23 @@ async function runBrowserChecks() {
     await page.waitForSelector("text=Latest activity");
 
     const pageChecks = [
-      ["Email tracking", "Email tracking"],
-      ["Link clicks", "Link clicks"],
-      ["PDF analytics", "PDF analytics"],
-      ["My performance", "My performance"],
-      ["MyCRM", "MyCRM"],
-      ["Settings & account", "Settings & account"],
-      ["Latest activity", "Latest activity"]
+      ["Email tracking", "Email tracking", "email"],
+      ["Link clicks", "Link clicks", "links"],
+      ["PDF analytics", "PDF analytics", "pdf"],
+      ["My performance", "My performance", "performance"],
+      ["MyCRM", "MyCRM", "crm"],
+      ["Settings & account", "Settings & account", "settings"],
+      ["Latest activity", "Latest activity", "activity"]
     ];
 
-    for (const [nav, heading] of pageChecks) {
+    for (const [nav, heading, pageId] of pageChecks) {
       await page.getByRole("button", { name: nav }).first().click();
       await page.waitForSelector(`h1:text("${heading}")`);
+      assert.equal(
+        await searchParam(page, "page"),
+        pageId,
+        `${nav} navigation should update the page URL parameter`
+      );
     }
 
     await page.goto(`${appUrl}&page=activity&accountEmail=s.stadnek96@gmail.com`);
@@ -339,7 +344,38 @@ async function runBrowserChecks() {
     await page.waitForSelector("h1:text('Email tracking')");
     await page.waitForSelector("text=Message report");
     await page.waitForSelector("text=lawncare-pricing.pdf");
+    assert.equal(await searchParam(page, "page"), "email", "message deep link should route to Email tracking");
+    assert.equal(await searchParam(page, "messageId"), "msg-1002", "message deep link should keep messageId in the URL");
     await page.getByLabel("Close").click();
+    await page.waitForFunction(() => !new URL(window.location.href).searchParams.has("messageId"));
+
+    await page.getByRole("button", { name: /Open report for Question About Lawncare/i }).click();
+    await page.waitForSelector("text=Message report");
+    const openedMessageId = await searchParam(page, "messageId");
+    assert.ok(openedMessageId, "opening a message report should push messageId into the URL");
+    await page.goBack();
+    await page.waitForSelector("h1:text('Email tracking')");
+    await page.waitForFunction(() => !new URL(window.location.href).searchParams.has("messageId"));
+    assert.equal(await page.getByText("Message report").count(), 0, "browser back should close the message report");
+
+    await page.getByRole("button", { name: /Open report for Question About Lawncare/i }).click();
+    await page.waitForSelector("text=Message report");
+    const persistedMessageId = await searchParam(page, "messageId");
+    await page.reload();
+    await page.waitForSelector(".profile-button, .auth-modal");
+    if (await page.locator(".auth-modal").count()) {
+      await page.getByRole("button", { name: /Use harness account/i }).click();
+    }
+    await page.waitForSelector("text=Message report");
+    assert.equal(await searchParam(page, "messageId"), persistedMessageId, "refresh should preserve the open message report route");
+    await page.getByLabel("Close").click();
+    await page.waitForFunction(() => !new URL(window.location.href).searchParams.has("messageId"));
+    await page.getByRole("button", { name: "Link clicks" }).first().click();
+    await page.waitForSelector("h1:text('Link clicks')");
+    assert.equal(await searchParam(page, "page"), "links", "page URL should update after leaving an email report");
+    await page.goBack();
+    await page.waitForSelector("h1:text('Email tracking')");
+    assert.equal(await searchParam(page, "messageId"), null, "back from another page should not reopen a cleared message report");
 
     await page.getByRole("button", { name: "Email tracking" }).first().click();
     await page.waitForSelector("text=Question About Lawncare");
@@ -361,7 +397,6 @@ async function runBrowserChecks() {
     await page.locator(".profile-button").click();
     const profileMenu = page.locator(".profile-menu");
     await page.waitForSelector("text=spencer.tpp@gmail.com");
-    await page.waitForSelector("text=tracking connected");
     assert.equal(await profileMenu.getByText("All connected accounts").count(), 0, "profile menu should not show the combined accounts row");
     assert.equal(await profileMenu.getByText("Add another mail account").count(), 0, "profile menu should not show add-account shortcut");
     assert.equal(await profileMenu.getByText("Change app login").count(), 0, "profile menu should not show app-login shortcut");
@@ -390,6 +425,17 @@ async function runBrowserChecks() {
     await page.locator(".profile-button").click();
     const activeAccountRowText = await page.locator(".mail-account-row.is-active").innerText();
     assert.match(activeAccountRowText, /spencer\.tpp@gmail\.com[\s\S]*Active/, "switched account row should be marked active");
+    await page.reload();
+    await page.waitForSelector(".profile-button, .auth-modal");
+    if (await page.locator(".auth-modal").count()) {
+      await page.getByRole("button", { name: /Use harness account/i }).click();
+    }
+    await page.waitForSelector("text=TPP account follow-up");
+    assert.equal(await searchParam(page, "accountEmail"), "spencer.tpp@gmail.com", "refresh should preserve the selected mail account");
+    assert.equal(await page.getByText("Question About Lawncare").count(), 0, "refresh should keep the switched account data scope");
+    await page.locator(".profile-button").click();
+    const reloadedActiveAccountText = await page.locator(".mail-account-row.is-active").innerText();
+    assert.match(reloadedActiveAccountText, /spencer\.tpp@gmail\.com[\s\S]*Active/, "reloaded account row should remain active");
     await page.getByRole("button", { name: /Sign out/i }).click();
     await page.waitForFunction(() => (
       window.__simpleTrackExternalRequests || []
@@ -507,8 +553,9 @@ async function runBrowserChecks() {
     await page.waitForSelector("h1:text('Connect Outlook')");
     if (await page.getByRole("button", { name: /Use harness account/i }).count()) {
       await page.getByRole("button", { name: /Use harness account/i }).click();
+    } else {
+      await page.getByRole("button", { name: /Connect this Outlook|Continue with Outlook/i }).click();
     }
-    await page.getByRole("button", { name: /Connect this Outlook/i }).click();
     await page.waitForSelector("h1:text('Outlook connected')");
     await page.waitForSelector("text=spencer.stadnek@outlook.com can now use Simple Track from Outlook without access keys.");
     assert.equal(
@@ -549,6 +596,10 @@ async function waitForDashboardRequest(requests, accountEmail) {
   }
 
   throw new Error(`Expected dashboard request for ${accountEmail}; saw ${JSON.stringify(requests)}`);
+}
+
+async function searchParam(page, name) {
+  return page.evaluate((paramName) => new URL(window.location.href).searchParams.get(paramName), name);
 }
 
 async function json(route, status, body) {

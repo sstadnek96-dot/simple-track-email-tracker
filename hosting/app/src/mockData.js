@@ -90,6 +90,24 @@ const baseMessages = [
     attachmentOpens: 0,
     status: "sent",
     events: []
+  },
+  {
+    id: "msg-1005",
+    accountEmail: "spencer.tpp@gmail.com",
+    recipients: ["client@example.com"],
+    subject: "TPP account follow-up",
+    sentAt: "2026-06-16T16:22:00.000Z",
+    lastActivityAt: "2026-06-16T18:31:00.000Z",
+    opens: 1,
+    clicks: 0,
+    attachmentOpens: 0,
+    status: "opened",
+    events: [
+      {
+        type: "open",
+        createdAt: "2026-06-16T18:31:00.000Z"
+      }
+    ]
   }
 ];
 
@@ -183,6 +201,15 @@ export const mockBootstrap = {
       client: "Gmail",
       status: "connected",
       connectedAt: "2026-05-18T18:20:00.000Z"
+    },
+    {
+      id: "spencer.tpp@gmail.com",
+      email: "spencer.tpp@gmail.com",
+      displayName: "Spencer Stadnek",
+      provider: "google",
+      client: "Gmail",
+      status: "connected",
+      connectedAt: "2026-06-16T16:20:00.000Z"
     }
   ]
 };

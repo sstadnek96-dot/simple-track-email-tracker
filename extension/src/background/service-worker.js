@@ -70,7 +70,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   handleMessage(message)
     .then((response) => sendResponse(response))
     .catch((error) => {
-      console.error("Simple Track message error", error);
+      console.warn("Simple Track message failed", error);
       sendResponse({ ok: false, error: error.message });
     });
 
@@ -82,7 +82,7 @@ if (chrome.runtime.onMessageExternal) {
     handleExternalMessage(message, sender)
       .then((response) => sendResponse(response))
       .catch((error) => {
-        console.error("Simple Track external message failed", error);
+        console.warn("Simple Track external message failed", error);
         sendResponse({ ok: false, error: error.message });
       });
 
@@ -673,15 +673,20 @@ async function createWebAppSession(message = {}) {
     return { ok: false, error: `${accountEmail} is not connected to this extension install.` };
   }
 
-  const response = await fetch(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/app/extension-session`, {
-    method: "POST",
-    headers: getBackendHeaders(settings, installSecret),
-    body: JSON.stringify({ installId, accountEmail })
-  });
+  let response;
+  try {
+    response = await fetch(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/app/extension-session`, {
+      method: "POST",
+      headers: getBackendHeaders(settings, installSecret),
+      body: JSON.stringify({ installId, accountEmail })
+    });
+  } catch (error) {
+    return { ok: false, error: error.message || "Could not reach the tracking service." };
+  }
   const body = await response.json().catch(() => null);
 
   if (!response.ok || !body?.ok) {
-    throw new Error(body?.error || `Web app session failed (${response.status})`);
+    return { ok: false, error: body?.error || `Web app session failed (${response.status})` };
   }
 
   if (body.connectedAccounts) {
@@ -708,15 +713,20 @@ async function disconnectAccount(message = {}) {
 
   if (settings.backendBaseUrl && installId && installSecret) {
     await rememberKnownAccounts(currentAccounts);
-    const response = await fetch(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/app/extension-disconnect`, {
-      method: "POST",
-      headers: getBackendHeaders(settings, installSecret),
-      body: JSON.stringify({ installId, accountEmail })
-    });
+    let response;
+    try {
+      response = await fetch(`${normalizeBackendBaseUrl(settings.backendBaseUrl)}/app/extension-disconnect`, {
+        method: "POST",
+        headers: getBackendHeaders(settings, installSecret),
+        body: JSON.stringify({ installId, accountEmail })
+      });
+    } catch (error) {
+      return { ok: false, error: error.message || "Could not reach the tracking service." };
+    }
     const body = await response.json().catch(() => null);
 
     if (!response.ok || !body?.ok) {
-      throw new Error(body?.error || `Account disconnect failed (${response.status})`);
+      return { ok: false, error: body?.error || `Account disconnect failed (${response.status})` };
     }
 
     const saved = await saveInstallAccountState(body, "");
