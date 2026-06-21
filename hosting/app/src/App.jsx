@@ -50,6 +50,7 @@ const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const PROFILE_PHOTO_CACHE_KEY = "simpleTrack.profilePhotos";
 const EXTENSION_SESSION_CACHE_KEY = "simpleTrack.extensionSession";
 const ACTIVE_MAIL_ACCOUNT_CACHE_KEY = "simpleTrack.activeMailAccount";
+const ROUTE_EXTENSION_CONTEXT_PARAM = "stContext";
 const EXTENSION_BRIDGE_TIMEOUT_MS = 2200;
 
 function harnessAllowed() {
@@ -71,7 +72,7 @@ function readAppRouteParams() {
 }
 
 function readExtensionContext(searchParams, hashParams) {
-  const encoded = hashParams.get("stContext") || searchParams.get("stContext") || "";
+  const encoded = hashParams.get(ROUTE_EXTENSION_CONTEXT_PARAM) || searchParams.get(ROUTE_EXTENSION_CONTEXT_PARAM) || "";
   const context = decodeRouteContext(encoded);
   const connectedAccounts = Array.isArray(context?.connectedAccounts)
     ? context.connectedAccounts.map(normalizeAccountRecord).filter(Boolean)
@@ -90,6 +91,36 @@ function readExtensionContext(searchParams, hashParams) {
     connectedAccounts,
     knownAccounts
   };
+}
+
+function removeRouteExtensionContext(url) {
+  let changed = false;
+
+  if (url.searchParams.has(ROUTE_EXTENSION_CONTEXT_PARAM)) {
+    url.searchParams.delete(ROUTE_EXTENSION_CONTEXT_PARAM);
+    changed = true;
+  }
+
+  const hashValue = url.hash.replace(/^#/, "");
+  if (hashValue) {
+    const hashParams = new URLSearchParams(hashValue);
+    if (hashParams.has(ROUTE_EXTENSION_CONTEXT_PARAM)) {
+      hashParams.delete(ROUTE_EXTENSION_CONTEXT_PARAM);
+      const nextHash = hashParams.toString();
+      url.hash = nextHash ? `#${nextHash}` : "";
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+function clearRouteExtensionContext() {
+  if (typeof window === "undefined" || !window.history) return;
+
+  const url = new URL(window.location.href);
+  if (!removeRouteExtensionContext(url)) return;
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 function normalizeHandoffTokens(context) {
@@ -180,8 +211,13 @@ function mergeExtensionContexts(...contexts) {
     }
   }
 
-  merged.connectedAccounts = [...byEmail.values()];
   merged.knownAccounts = [...knownByEmail.values()];
+  const loginRequiredEmails = new Set(
+    merged.knownAccounts
+      .filter((account) => account.status === "login_required")
+      .map((account) => account.email)
+  );
+  merged.connectedAccounts = [...byEmail.values()].filter((account) => !loginRequiredEmails.has(account.email));
   return merged;
 }
 
@@ -264,6 +300,7 @@ function writeAppRoute({ page = "", accountEmail = "", messageId = "" } = {}, { 
   if (typeof window === "undefined" || !window.history) return;
 
   const url = new URL(window.location.href);
+  removeRouteExtensionContext(url);
   const nextPage = normalizePageId(page);
   const normalizedEmail = normalizeAccountEmail(accountEmail);
   const normalizedMessageId = String(messageId || "");
@@ -436,7 +473,7 @@ function App() {
       const extensionConnectedAccounts = extensionSessionContext?.connectedAccounts || [];
       const connectedEmails = new Set(extensionConnectedAccounts.map((account) => normalizeAccountEmail(account.email)).filter(Boolean));
       const extensionKnownAccounts = (extensionSessionContext?.knownAccounts || [])
-        .filter((account) => !connectedEmails.has(normalizeAccountEmail(account.email)));
+        .filter((account) => account.status === "login_required" || !connectedEmails.has(normalizeAccountEmail(account.email)));
       return mergeProfileAccounts(
         data?.connectedAccounts || bootstrap?.connectedAccounts || [],
         [
@@ -553,6 +590,11 @@ function App() {
       writeStoredExtensionContext(next);
       return next;
     });
+    clearRouteExtensionContext();
+    setRouteParams((current) => ({
+      ...current,
+      extensionContext: readExtensionContext(new URLSearchParams(), new URLSearchParams())
+    }));
   }, [routeParams.extensionContext]);
 
   useEffect(() => {

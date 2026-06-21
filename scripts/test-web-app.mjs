@@ -394,6 +394,12 @@ async function runBrowserChecks() {
       await page.getByRole("button", { name: /Use harness account/i }).click();
     }
     await page.waitForSelector(".profile-button");
+    await page.waitForFunction(() => !new URL(window.location.href).hash.includes("stContext"));
+    assert.equal(
+      await page.evaluate(() => new URL(window.location.href).hash.includes("stContext")),
+      false,
+      "extension handoff context must be consumed once and removed before refresh"
+    );
     await page.locator(".profile-button").click();
     const profileMenu = page.locator(".profile-menu");
     await page.waitForSelector("text=spencer.tpp@gmail.com");
@@ -407,6 +413,11 @@ async function runBrowserChecks() {
     );
     await page.getByRole("button", { name: "Switch to spencer.tpp@gmail.com" }).click();
     await waitForDashboardRequest(dashboardRequests, "spencer.tpp@gmail.com");
+    assert.equal(
+      await page.evaluate(() => new URL(window.location.href).hash.includes("stContext")),
+      false,
+      "switching accounts should not preserve stale extension handoff context"
+    );
     assert.equal(
       await page.getByText("Open Simple Track from the Chrome extension").count(),
       0,
@@ -431,6 +442,11 @@ async function runBrowserChecks() {
       await page.getByRole("button", { name: /Use harness account/i }).click();
     }
     await page.waitForSelector("text=TPP account follow-up");
+    assert.equal(
+      await page.evaluate(() => new URL(window.location.href).hash.includes("stContext")),
+      false,
+      "hard refresh should not restore stale extension handoff context"
+    );
     assert.equal(await searchParam(page, "accountEmail"), "spencer.tpp@gmail.com", "refresh should preserve the selected mail account");
     assert.equal(await page.getByText("Question About Lawncare").count(), 0, "refresh should keep the switched account data scope");
     await page.locator(".profile-button").click();
@@ -443,11 +459,16 @@ async function runBrowserChecks() {
     await waitForDashboardRequest(dashboardRequests, "s.stadnek96@gmail.com");
     await page.waitForSelector("text=Question About Lawncare");
     await page.locator(".profile-button").click();
-    assert.equal(
-      await page.getByRole("button", { name: "Log back in to spencer.tpp@gmail.com" }).count(),
-      1,
-      "signed-out account should stay in the web app account menu as a login-required row"
-    );
+    const loginRequiredRowCount = await page.getByRole("button", { name: "Log back in to spencer.tpp@gmail.com" }).count();
+    if (loginRequiredRowCount !== 1) {
+      const state = await page.evaluate(() => ({
+        activeMailAccount: window.localStorage.getItem("simpleTrack.activeMailAccount"),
+        extensionSession: window.localStorage.getItem("simpleTrack.extensionSession"),
+        url: window.location.href
+      }));
+      const menuText = await page.locator(".profile-menu").innerText();
+      throw new Error(`signed-out account should stay in the web app account menu as a login-required row; count=${loginRequiredRowCount}; menu=${menuText}; state=${JSON.stringify(state)}`);
+    }
     await page.getByRole("button", { name: "Log back in to spencer.tpp@gmail.com" }).click();
     await page.waitForFunction(() => (
       window.__simpleTrackExternalRequests || []
