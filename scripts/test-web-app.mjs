@@ -116,6 +116,7 @@ async function runBrowserChecks() {
   const page = await context.newPage();
   const browserErrors = [];
   const dashboardRequests = [];
+  const dashboardAuthRequests = [];
 
   await page.addInitScript(() => {
     Object.defineProperty(window, "chrome", {
@@ -219,16 +220,18 @@ async function runBrowserChecks() {
 
     const url = new URL(request.url());
     const path = url.pathname;
+    const authEmail = authEmailFromHeader(auth);
 
     if (path.endsWith("/bootstrap")) {
-      await json(route, 200, mockBootstrap);
+      await json(route, 200, bootstrapForAuth(authEmail));
       return;
     }
 
     if (path.endsWith("/dashboard")) {
       const accountEmail = (url.searchParams.get("accountEmail") || "").toLowerCase();
       dashboardRequests.push(accountEmail || "all");
-      await json(route, 200, { ok: true, data: dashboardForAccount(accountEmail) });
+      dashboardAuthRequests.push({ accountEmail: accountEmail || "all", authEmail });
+      await json(route, 200, { ok: true, data: dashboardForAccount(accountEmail, authEmail) });
       return;
     }
 
@@ -380,13 +383,6 @@ async function runBrowserChecks() {
     await page.getByRole("button", { name: "Email tracking" }).first().click();
     await page.waitForSelector("text=Question About Lawncare");
     assert.equal(await page.getByText("Signed intake package").count(), 0, "default selected account should hide another account's messages");
-    await page.locator(".profile-button").click();
-    await page.getByRole("button", { name: "Switch to sstadnek96@gmail.com" }).click();
-    await page.waitForSelector("text=Signed intake package");
-    assert.equal(await page.getByText("Question About Lawncare").count(), 0, "selected account should hide the first account's messages");
-    await page.locator(".profile-button").click();
-    await page.getByRole("button", { name: "Switch to s.stadnek96@gmail.com" }).click();
-    await page.waitForSelector("text=Question About Lawncare");
 
     await page.goto(`${appUrl}&page=activity&accountEmail=s.stadnek96@gmail.com#stContext=${extensionContext}`);
     await page.waitForSelector(".profile-button, .auth-modal");
@@ -413,6 +409,8 @@ async function runBrowserChecks() {
     );
     await page.getByRole("button", { name: "Switch to spencer.tpp@gmail.com" }).click();
     await waitForDashboardRequest(dashboardRequests, "spencer.tpp@gmail.com");
+    await waitForAuthorizedDashboardRequest(dashboardAuthRequests, "spencer.tpp@gmail.com", "spencer.tpp@gmail.com");
+    await page.waitForSelector("text=TPP account follow-up");
     assert.equal(
       await page.evaluate(() => new URL(window.location.href).hash.includes("stContext")),
       false,
@@ -452,6 +450,17 @@ async function runBrowserChecks() {
     await page.locator(".profile-button").click();
     const reloadedActiveAccountText = await page.locator(".mail-account-row.is-active").innerText();
     assert.match(reloadedActiveAccountText, /spencer\.tpp@gmail\.com[\s\S]*Active/, "reloaded account row should remain active");
+    await page.getByRole("button", { name: "Switch to s.stadnek96@gmail.com" }).click();
+    await waitForAuthorizedDashboardRequest(dashboardAuthRequests, "s.stadnek96@gmail.com", "s.stadnek96@gmail.com");
+    await page.waitForSelector("text=Question About Lawncare");
+    assert.equal(await page.getByText("TPP account follow-up").count(), 0, "switching back should hide the previous account data");
+    await page.locator(".profile-button").click();
+    const switchedBackActiveText = await page.locator(".mail-account-row.is-active").innerText();
+    assert.match(switchedBackActiveText, /s\.stadnek96@gmail\.com[\s\S]*Active/, "switching back should mark s.stadnek96 active");
+    await page.getByRole("button", { name: "Switch to spencer.tpp@gmail.com" }).click();
+    await waitForAuthorizedDashboardRequest(dashboardAuthRequests, "spencer.tpp@gmail.com", "spencer.tpp@gmail.com");
+    await page.waitForSelector("text=TPP account follow-up");
+    await page.locator(".profile-button").click();
     await page.getByRole("button", { name: /Sign out/i }).click();
     await page.waitForFunction(() => (
       window.__simpleTrackExternalRequests || []
@@ -590,10 +599,44 @@ async function runBrowserChecks() {
   }
 }
 
-function dashboardForAccount(accountEmail = "") {
-  if (!accountEmail) return mockDashboard;
+function authEmailFromHeader(authHeader = "") {
+  const match = String(authHeader).match(/^Bearer\s+harness-token-(.+)$/i);
+  return (match?.[1] || "").toLowerCase();
+}
 
-  const messages = mockDashboard.messages.filter((message) => message.accountEmail === accountEmail);
+function bootstrapForAuth(authEmail = "") {
+  const account = getMockAccount(authEmail) || mockBootstrap.connectedAccounts[0];
+  return {
+    ...mockBootstrap,
+    user: {
+      ...mockBootstrap.user,
+      email: account.email,
+      displayName: account.displayName || account.email
+    },
+    org: {
+      ...mockBootstrap.org,
+      id: `harness-org-${account.email}`,
+      name: `${account.displayName || account.email}'s workspace`
+    },
+    connectedAccounts: [account]
+  };
+}
+
+function getMockAccount(accountEmail = "") {
+  const normalizedEmail = String(accountEmail || "").toLowerCase();
+  return mockBootstrap.connectedAccounts.find((account) => account.email === normalizedEmail) || null;
+}
+
+function dashboardForAccount(accountEmail = "", authEmail = "") {
+  const normalizedAuthEmail = String(authEmail || "").toLowerCase();
+  const requestedAccountEmail = String(accountEmail || "").toLowerCase();
+  const effectiveAccountEmail = requestedAccountEmail || normalizedAuthEmail;
+  const canReadAccount = !effectiveAccountEmail || !normalizedAuthEmail || effectiveAccountEmail === normalizedAuthEmail;
+  const accountScope = canReadAccount ? effectiveAccountEmail : "__no_access__";
+  const connectedAccount = getMockAccount(normalizedAuthEmail);
+  if (!accountScope && !connectedAccount) return mockDashboard;
+
+  const messages = mockDashboard.messages.filter((message) => message.accountEmail === accountScope);
   const messageIds = new Set(messages.map((message) => message.id));
 
   return {
@@ -605,7 +648,8 @@ function dashboardForAccount(accountEmail = "") {
       messages.some((message) => (
         (message.recipients || []).some((recipient) => recipient.toLowerCase().includes(contact.email))
       ))
-    ))
+    )),
+    connectedAccounts: connectedAccount ? [connectedAccount] : []
   };
 }
 
@@ -617,6 +661,16 @@ async function waitForDashboardRequest(requests, accountEmail) {
   }
 
   throw new Error(`Expected dashboard request for ${accountEmail}; saw ${JSON.stringify(requests)}`);
+}
+
+async function waitForAuthorizedDashboardRequest(requests, accountEmail, authEmail) {
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    if (requests.some((request) => request.accountEmail === accountEmail && request.authEmail === authEmail)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  throw new Error(`Expected dashboard request for ${accountEmail} authenticated as ${authEmail}; saw ${JSON.stringify(requests)}`);
 }
 
 async function searchParam(page, name) {

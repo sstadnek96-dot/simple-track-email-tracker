@@ -439,12 +439,13 @@ function setCachedProfilePhoto(email, photoURL) {
   }
 }
 
-function createHarnessUser() {
+function createHarnessUser(overrides = {}) {
+  const email = normalizeAccountEmail(overrides.email) || "s.stadnek96@gmail.com";
   return {
-    displayName: "Spencer Stadnek",
-    email: "s.stadnek96@gmail.com",
+    displayName: overrides.displayName || "Spencer Stadnek",
+    email,
     photoURL: "",
-    getIdToken: async () => "harness-token"
+    getIdToken: async () => `harness-token-${email}`
   };
 }
 
@@ -609,6 +610,10 @@ function App() {
   }, [authReady, extensionSessionContext, routeParams.accountEmail, user?.email]);
 
   async function getToken() {
+    if (allowHarness && typeof window !== "undefined") {
+      const harnessEmail = normalizeAccountEmail(window.__simpleTrackHarnessAuthEmail || "");
+      if (harnessEmail) return `harness-token-${harnessEmail}`;
+    }
     if (auth.currentUser?.getIdToken) return auth.currentUser.getIdToken();
     return user?.getIdToken ? user.getIdToken() : "";
   }
@@ -742,11 +747,12 @@ function App() {
     try {
       if (allowHarness && String(customToken).startsWith("harness-token")) {
         const normalizedEmail = normalizeAccountEmail(accountEmail);
-        setUser({
-          ...createHarnessUser(),
+        const harnessUser = createHarnessUser({
           email: normalizedEmail || "s.stadnek96@gmail.com",
           displayName: normalizedEmail === "spencer.tpp@gmail.com" ? "Spencer Stadnek" : "Spencer Davidson"
         });
+        window.__simpleTrackHarnessAuthEmail = harnessUser.email;
+        setUser(harnessUser);
         setBootstrap(mockBootstrap);
         setData(mockDashboard);
         if (normalizedEmail) {
@@ -756,7 +762,7 @@ function App() {
             messageId: focusedMessageId
           }, { replace: true });
         }
-        return;
+        return harnessUser;
       }
 
       const result = await signInWithCustomToken(auth, customToken);
@@ -939,13 +945,12 @@ function App() {
 
   function loginHarness(overrides = {}) {
     setError("");
-    const baseUser = createHarnessUser();
     const overrideEmail = normalizeAccountEmail(overrides.email);
-    const harnessUser = {
-      ...baseUser,
+    const harnessUser = createHarnessUser({
       ...overrides,
-      email: overrideEmail || overrides.email || baseUser.email
-    };
+      email: overrideEmail || overrides.email
+    });
+    window.__simpleTrackHarnessAuthEmail = harnessUser.email;
     setUser(harnessUser);
     setBootstrap(mockBootstrap);
     setData(mockDashboard);
@@ -1079,7 +1084,19 @@ function App() {
     });
     if (options.closeProfile) setProfileOpen(false);
     const account = enrichedProfileAccounts.find((entry) => entry.email === normalizedEmail);
-    if (account?.status === "browser_connected") {
+    const currentUserEmail = normalizeAccountEmail(user?.email);
+    const canUseExtensionSession = normalizedEmail &&
+      normalizedEmail !== "all" &&
+      account?.status !== "login_required" &&
+      (extensionContextHasAccount(extensionSessionContext, normalizedEmail) || account?.status === "browser_connected");
+
+    if (canUseExtensionSession && normalizedEmail !== currentUserEmail) {
+      const switchedUser = await signInToMailAccount(normalizedEmail);
+      if (switchedUser) {
+        await refreshDashboardForAccount(nextAccount);
+        return;
+      }
+    } else if (account?.status === "browser_connected") {
       await signInToMailAccount(normalizedEmail);
     }
     await refreshDashboardForAccount(nextAccount);
