@@ -410,7 +410,9 @@ async function runBrowserChecks() {
     await page.getByRole("button", { name: "Switch to spencer.tpp@gmail.com" }).click();
     await waitForDashboardRequest(dashboardRequests, "spencer.tpp@gmail.com");
     await waitForAuthorizedDashboardRequest(dashboardAuthRequests, "spencer.tpp@gmail.com", "spencer.tpp@gmail.com");
+    await page.waitForSelector("text=Spencer Stadnek's workspace");
     await page.waitForSelector("text=TPP account follow-up");
+    assert.equal(await page.getByText("Question About Lawncare").count(), 0, "switched workspace should not show the old account rows");
     assert.equal(
       await page.evaluate(() => new URL(window.location.href).hash.includes("stContext")),
       false,
@@ -434,11 +436,13 @@ async function runBrowserChecks() {
     await page.locator(".profile-button").click();
     const activeAccountRowText = await page.locator(".mail-account-row.is-active").innerText();
     assert.match(activeAccountRowText, /spencer\.tpp@gmail\.com[\s\S]*Active/, "switched account row should be marked active");
+    await assertActiveAccountBadge(page, "spencer.tpp@gmail.com");
     await page.reload();
     await page.waitForSelector(".profile-button, .auth-modal");
     if (await page.locator(".auth-modal").count()) {
       await page.getByRole("button", { name: /Use harness account/i }).click();
     }
+    await page.waitForSelector("text=Spencer Stadnek's workspace");
     await page.waitForSelector("text=TPP account follow-up");
     assert.equal(
       await page.evaluate(() => new URL(window.location.href).hash.includes("stContext")),
@@ -450,15 +454,19 @@ async function runBrowserChecks() {
     await page.locator(".profile-button").click();
     const reloadedActiveAccountText = await page.locator(".mail-account-row.is-active").innerText();
     assert.match(reloadedActiveAccountText, /spencer\.tpp@gmail\.com[\s\S]*Active/, "reloaded account row should remain active");
+    await assertActiveAccountBadge(page, "spencer.tpp@gmail.com");
     await page.getByRole("button", { name: "Switch to s.stadnek96@gmail.com" }).click();
     await waitForAuthorizedDashboardRequest(dashboardAuthRequests, "s.stadnek96@gmail.com", "s.stadnek96@gmail.com");
+    await page.waitForSelector("text=Spencer Davidson's workspace");
     await page.waitForSelector("text=Question About Lawncare");
     assert.equal(await page.getByText("TPP account follow-up").count(), 0, "switching back should hide the previous account data");
     await page.locator(".profile-button").click();
     const switchedBackActiveText = await page.locator(".mail-account-row.is-active").innerText();
     assert.match(switchedBackActiveText, /s\.stadnek96@gmail\.com[\s\S]*Active/, "switching back should mark s.stadnek96 active");
+    await assertActiveAccountBadge(page, "s.stadnek96@gmail.com");
     await page.getByRole("button", { name: "Switch to spencer.tpp@gmail.com" }).click();
     await waitForAuthorizedDashboardRequest(dashboardAuthRequests, "spencer.tpp@gmail.com", "spencer.tpp@gmail.com");
+    await page.waitForSelector("text=Spencer Stadnek's workspace");
     await page.waitForSelector("text=TPP account follow-up");
     await page.locator(".profile-button").click();
     await page.getByRole("button", { name: /Sign out/i }).click();
@@ -671,6 +679,24 @@ async function waitForAuthorizedDashboardRequest(requests, accountEmail, authEma
   }
 
   throw new Error(`Expected dashboard request for ${accountEmail} authenticated as ${authEmail}; saw ${JSON.stringify(requests)}`);
+}
+
+async function assertActiveAccountBadge(page, accountEmail) {
+  const activeState = await page.locator(".mail-account-row.is-active").evaluate((row) => {
+    const badge = row.querySelector(".account-state");
+    const badgeStyle = badge ? getComputedStyle(badge) : null;
+    return {
+      rowText: row.textContent || "",
+      badgeText: badge?.textContent?.trim() || "",
+      badgeColor: badgeStyle?.color || "",
+      badgeBackground: badgeStyle?.backgroundColor || ""
+    };
+  });
+
+  assert.match(activeState.rowText, new RegExp(accountEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "active row should be the requested account");
+  assert.equal(activeState.badgeText, "Active", "active row should show Active");
+  assert.match(activeState.badgeBackground, /rgb\(223, 248, 235\)|rgb\(231, 248, 240\)/, "active badge should use the green active background");
+  assert.match(activeState.badgeColor, /rgb\(8, 116, 67\)|rgb\(8, 127, 91\)|rgb\(0, 128, 92\)/, "active badge should use green active text");
 }
 
 async function searchParam(page, name) {

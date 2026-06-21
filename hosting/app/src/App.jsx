@@ -762,6 +762,7 @@ function App() {
             messageId: focusedMessageId
           }, { replace: true });
         }
+        forgetExtensionHandoffToken(normalizedEmail);
         return harnessUser;
       }
 
@@ -775,6 +776,7 @@ function App() {
           messageId: focusedMessageId
         }, { replace: true });
       }
+      forgetExtensionHandoffToken(accountEmail);
       return nextUser;
     } catch (sessionError) {
       setError(`Could not open ${accountEmail || "that account"} automatically. ${sessionError.message}`);
@@ -786,20 +788,18 @@ function App() {
     const normalizedEmail = normalizeAccountEmail(accountEmail);
     if (!normalizedEmail) return;
 
-    const existingToken = getHandoffToken(extensionSessionContext, normalizedEmail);
-    if (existingToken) {
-      return signInFromExtensionHandoff(existingToken, normalizedEmail);
-    }
-
     const session = await requestExtensionWebAppSession(normalizedEmail);
     if (session?.customToken) {
       rememberExtensionSession({
-        handoffAccountEmail: normalizedEmail,
-        handoffToken: session.customToken,
-        handoffTokens: { [normalizedEmail]: session.customToken },
+        activeAccountEmail: normalizedEmail,
         connectedAccounts: session.connectedAccounts || []
       });
       return signInFromExtensionHandoff(session.customToken, normalizedEmail);
+    }
+
+    const existingToken = getHandoffToken(extensionSessionContext, normalizedEmail);
+    if (existingToken) {
+      return signInFromExtensionHandoff(existingToken, normalizedEmail);
     }
 
     return null;
@@ -943,6 +943,25 @@ function App() {
     });
   }
 
+  function forgetExtensionHandoffToken(accountEmail = "") {
+    const normalizedEmail = normalizeAccountEmail(accountEmail);
+    if (!normalizedEmail) return;
+
+    setExtensionSessionContext((current) => {
+      const handoffTokens = { ...(current?.handoffTokens || {}) };
+      delete handoffTokens[normalizedEmail];
+      const currentHandoffEmail = normalizeAccountEmail(current?.handoffAccountEmail);
+      const next = {
+        ...(current || {}),
+        handoffAccountEmail: currentHandoffEmail === normalizedEmail ? "" : current?.handoffAccountEmail || "",
+        handoffToken: currentHandoffEmail === normalizedEmail ? "" : current?.handoffToken || "",
+        handoffTokens
+      };
+      writeStoredExtensionContext(next);
+      return next;
+    });
+  }
+
   function loginHarness(overrides = {}) {
     setError("");
     const overrideEmail = normalizeAccountEmail(overrides.email);
@@ -1077,11 +1096,6 @@ function App() {
   async function selectMailAccount(accountEmail, options = {}) {
     const normalizedEmail = normalizeAccountEmail(accountEmail);
     const nextAccount = normalizedEmail || "all";
-    setAppRouteState({
-      page: activePage,
-      accountEmail: nextAccount,
-      messageId: ""
-    });
     if (options.closeProfile) setProfileOpen(false);
     const account = enrichedProfileAccounts.find((entry) => entry.email === normalizedEmail);
     const currentUserEmail = normalizeAccountEmail(user?.email);
@@ -1093,12 +1107,28 @@ function App() {
     if (canUseExtensionSession && normalizedEmail !== currentUserEmail) {
       const switchedUser = await signInToMailAccount(normalizedEmail);
       if (switchedUser) {
-        await refreshDashboardForAccount(nextAccount);
+        await loadWorkspace(nextAccount);
         return;
       }
-    } else if (account?.status === "browser_connected") {
-      await signInToMailAccount(normalizedEmail);
+      setAppRouteState({
+        page: activePage,
+        accountEmail: currentUserEmail || activeMailAccount,
+        messageId: ""
+      }, { replace: true });
+      return;
+    } else if (account?.status === "browser_connected" && normalizedEmail !== currentUserEmail) {
+      const switchedUser = await signInToMailAccount(normalizedEmail);
+      if (switchedUser) {
+        await loadWorkspace(nextAccount);
+      }
+      return;
     }
+
+    setAppRouteState({
+      page: activePage,
+      accountEmail: nextAccount,
+      messageId: ""
+    });
     await refreshDashboardForAccount(nextAccount);
   }
 

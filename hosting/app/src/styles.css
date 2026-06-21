@@ -361,8 +361,8 @@ p {
 }
 
 .mail-account-row.is-active {
-  background: #ffffff;
-  box-shadow: inset 4px 0 0 var(--blue);
+  background: #f6fff9;
+  box-shadow: inset 4px 0 0 var(--green);
 }
 
 .mail-account-avatar {
@@ -484,11 +484,6 @@ p {
   white-space: nowrap;
 }
 
-.mail-account-row.is-active .account-state {
-  color: var(--green-dark);
-  background: #e7f8f0;
-}
-
 .mail-account-row.is-pending .account-state {
   color: #8a4b00;
   background: #fff4db;
@@ -497,6 +492,17 @@ p {
 .mail-account-row.is-browser-connected .account-state {
   color: #475467;
   background: #edf3ff;
+}
+
+.mail-account-row.is-active .account-state,
+.mail-account-row.is-active.is-browser-connected .account-state {
+  color: var(--green-dark);
+  background: #dff8eb;
+  box-shadow: 0 0 0 1px rgba(20, 164, 99, 0.14), 0 6px 18px rgba(20, 164, 99, 0.18);
+}
+
+.mail-account-row.is-active .mail-account-copy small {
+  color: #087443;
 }
 
 .account-popout-note {
